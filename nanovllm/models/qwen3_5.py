@@ -7,6 +7,7 @@ import torch.distributed as dist
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
+from nanovllm.layers.deltanet import gated_delta_recurrent
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.layers.gptq import GPTQConfig
 from nanovllm.layers.linear import (
@@ -197,20 +198,14 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             * F.softplus(a.float() + self.dt_bias.float())
         ).exp()
 
-        outputs = []
-        state_f32 = recurrent_state
-        for token_idx in range(seq_len):
-            state_f32.mul_(decay[token_idx, :, None, None])
-            key_t = key[token_idx]
-            value_t = value[token_idx]
-            memory = (state_f32 * key_t.unsqueeze(-1)).sum(dim=-2)
-            delta = (value_t - memory) * beta[token_idx, :, None].float()
-            state_f32.add_(key_t.unsqueeze(-1) * delta.unsqueeze(-2))
-            outputs.append(
-                (state_f32 * query[token_idx].unsqueeze(-1)).sum(dim=-2)
-            )
-
-        core = torch.stack(outputs).to(hidden_states.dtype)
+        core = gated_delta_recurrent(
+            query,
+            key,
+            value,
+            beta.float(),
+            decay,
+            recurrent_state,
+        ).to(hidden_states.dtype)
         core = self.norm(core, z)
         return self.out_proj(core.reshape(seq_len, self.value_dim))
 
