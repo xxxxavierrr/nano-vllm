@@ -83,6 +83,14 @@ def test_gptq_loader_fuses_equal_g_idx_without_bf16_weight(tmp_path):
     assert torch.equal(linear.qweight[:, 24:].cpu(), tensors["v_proj.qweight"])
 
 
+def test_gptq_loader_detects_packed_symmetric_zero(tmp_path):
+    tensors = _checkpoint_tensors()
+    for name in ("q_proj", "k_proj", "v_proj"):
+        tensors[f"{name}.qzeros"].fill_(0x77777777)
+    model = _load(tmp_path, tensors)
+    assert model.qkv_proj._gptq_symmetric_zero
+
+
 def test_gptq_loader_rejects_fused_g_idx_mismatch(tmp_path):
     with pytest.raises(ValueError, match="fused GPTQ g_idx mismatch"):
         _load(tmp_path, _checkpoint_tensors(mismatched_g_idx=True))

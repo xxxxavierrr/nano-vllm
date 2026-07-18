@@ -16,11 +16,16 @@ def _pack_int4(values: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.sum(chunks << shifts, dim=dim + 1).to(torch.int32)
 
 
-def _make_inputs(m: int, k: int, n: int, desc_act: bool = True):
+def _make_inputs(
+    m: int, k: int, n: int, desc_act: bool = True, symmetric_zero: bool = False
+):
     torch.manual_seed(m + k + n)
     groups = k // 128
     values = torch.randint(0, 16, (k, n), device="cuda", dtype=torch.int32)
-    zeros = torch.randint(1, 17, (groups, n), device="cuda", dtype=torch.int32)
+    if symmetric_zero:
+        zeros = torch.full((groups, n), 8, device="cuda", dtype=torch.int32)
+    else:
+        zeros = torch.randint(1, 17, (groups, n), device="cuda", dtype=torch.int32)
     scales = (
         torch.rand(groups, n, device="cuda", dtype=torch.float32) * 0.05 + 0.005
     ).to(torch.bfloat16)
@@ -45,6 +50,23 @@ def test_gptq_w4a16_matches_reference(m, desc_act):
     x, qweight, scales, qzeros, g_idx = _make_inputs(m, 256, 192, desc_act)
     expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx)
     actual = gptq_w4a16_linear(x, qweight, scales, qzeros, g_idx)
+    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_gptq_w4a16_symmetric_zero_fast_path_matches_reference():
+    x, qweight, scales, qzeros, g_idx = _make_inputs(
+        19, 256, 192, desc_act=True, symmetric_zero=True
+    )
+    expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx)
+    actual = gptq_w4a16_linear(
+        x,
+        qweight,
+        scales,
+        qzeros,
+        g_idx,
+        symmetric_zero=True,
+    )
     torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 

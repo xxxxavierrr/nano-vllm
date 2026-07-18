@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=50)
     parser.add_argument("--ordered-g-idx", action="store_true")
+    parser.add_argument("--symmetric-zero", action="store_true")
     args = parser.parse_args()
 
     if args.k % 128 or args.k % 8 or args.n % 8:
@@ -48,7 +49,10 @@ def main():
     torch.manual_seed(0)
     groups = args.k // 128
     values = torch.randint(0, 16, (args.k, args.n), device="cuda", dtype=torch.int32)
-    zeros = torch.randint(1, 17, (groups, args.n), device="cuda", dtype=torch.int32)
+    if args.symmetric_zero:
+        zeros = torch.full((groups, args.n), 8, device="cuda", dtype=torch.int32)
+    else:
+        zeros = torch.randint(1, 17, (groups, args.n), device="cuda", dtype=torch.int32)
     scales = (
         torch.rand(groups, args.n, device="cuda", dtype=torch.float32) * 0.05 + 0.005
     ).to(torch.bfloat16)
@@ -64,7 +68,14 @@ def main():
     rows = []
     for m in args.m:
         x = torch.randn(m, args.k, device="cuda", dtype=torch.bfloat16)
-        gptq_fn = lambda: gptq_w4a16_linear(x, qweight, scales, qzeros, g_idx)
+        gptq_fn = lambda: gptq_w4a16_linear(
+            x,
+            qweight,
+            scales,
+            qzeros,
+            g_idx,
+            symmetric_zero=args.symmetric_zero,
+        )
         bf16_fn = lambda: F.linear(x, bf16_weight)
         gptq_ms = measure(gptq_fn, args.warmup, args.repeats)
         bf16_ms = measure(bf16_fn, args.warmup, args.repeats)

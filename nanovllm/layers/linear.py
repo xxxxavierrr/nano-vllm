@@ -31,6 +31,7 @@ class LinearBase(nn.Module):
         self.quant_config = quant_config
         self._gptq_loaded: set[tuple[str, object]] = set()
         self._g_idx_reference_shard: object | None = None
+        self._gptq_symmetric_zero = False
 
         if quant_config is None:
             self.weight = nn.Parameter(torch.empty(output_size, input_size))
@@ -190,6 +191,11 @@ class LinearBase(nn.Module):
             raise ValueError(
                 f"incomplete GPTQ checkpoint for {type(self).__name__}: {details}"
             )
+        if self.quant_config.sym:
+            stored_symmetric_zero = 0x77777777
+            self._gptq_symmetric_zero = bool(
+                torch.all(self.qzeros == stored_symmetric_zero).item()
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -215,6 +221,7 @@ class LinearBase(nn.Module):
                 self.qzeros,
                 self.g_idx,
                 bias,
+                symmetric_zero=self._gptq_symmetric_zero,
             )
         if self.weight_scale is None:
             return F.linear(x, self.weight, bias)
