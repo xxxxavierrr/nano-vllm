@@ -23,6 +23,18 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
+    def abort(self, seq_id: int) -> bool:
+        for queue in (self.waiting, self.running):
+            for seq in queue:
+                if seq.seq_id != seq_id:
+                    continue
+                queue.remove(seq)
+                if seq.block_table:
+                    self.block_manager.deallocate(seq)
+                seq.num_scheduled_tokens = 0
+                return True
+        return False
+
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
@@ -88,7 +100,10 @@ class Scheduler:
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
                 continue
             seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            reached_eos = not seq.ignore_eos and token_id == self.eos
+            reached_limit = seq.num_completion_tokens == seq.max_tokens
+            if reached_eos or reached_limit:
+                seq.finish_reason = "stop" if reached_eos else "length"
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
                 self.running.remove(seq)

@@ -53,6 +53,51 @@ model's original dtype:
 llm = LLM("/YOUR/MODEL/PATH", quantization="fp8", enforce_eager=True)
 ```
 
+## OpenAI-Compatible Serving
+
+Install the optional serving dependencies and start the API server with one
+command. The API process tokenizes requests and communicates with a dedicated
+GPU engine process over local ZMQ.
+
+```bash
+pip install -e ".[serve]"
+nano-vllm-serve --model /YOUR/MODEL/PATH
+```
+
+The module entrypoint is equivalent:
+
+```bash
+python -m nanovllm.serve.api_server --model /YOUR/MODEL/PATH
+```
+
+The server listens on `127.0.0.1:8000` by default. Use `--host 0.0.0.0` to
+expose it on the network. Chat Completions supports both streaming and
+non-streaming requests:
+
+On the GPU server, the convenience script uses the existing miniconda GPU
+environment and installs only missing Web dependencies without a pip cache:
+
+```bash
+cd /root/nano-vllm
+tools/start_server.sh
+```
+
+From a Windows checkout, this command opens a temporary SSH tunnel, sends one
+prompt, prints the streaming response, and closes the tunnel:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\chat_gpu.ps1 "用一句话介绍你自己"
+```
+
+Alternatively, open `ssh -N -L 8000:127.0.0.1:8000 gpu` in one local terminal
+and run `python tools/chat_stream.py "Hello"` in another.
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
 ## Benchmark
 
 `bench.py` provides an in-process synthetic benchmark with offline burst or

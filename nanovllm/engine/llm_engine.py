@@ -1,5 +1,5 @@
 import atexit
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -12,12 +12,21 @@ from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 
 
+@dataclass(slots=True)
+class EngineOutput:
+    seq_id: int
+    token_id: int
+    finished: bool
+    finish_reason: str | None
+
+
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
+        self._closed = False
         Sequence.block_size = config.kvcache_block_size
         self.ps = []
         self.events = []
@@ -35,6 +44,9 @@ class LLMEngine:
         atexit.register(self.exit)
 
     def exit(self):
+        if self._closed:
+            return
+        self._closed = True
         self.model_runner.call("exit")
         del self.model_runner
         for p in self.ps:
@@ -43,16 +55,26 @@ class LLMEngine:
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
+        if not prompt:
+            raise ValueError("prompt must contain at least one token")
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
         return seq.seq_id
 
+    def abort_request(self, seq_id: int) -> bool:
+        return self.scheduler.abort(seq_id)
+
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
+        previous_completion_tokens = {seq.seq_id: seq.num_completion_tokens for seq in seqs}
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [
+            EngineOutput(seq.seq_id, seq.last_token, seq.is_finished, seq.finish_reason)
+            for seq in seqs
+            if seq.num_completion_tokens > previous_completion_tokens[seq.seq_id]
+        ]
         return outputs, num_tokens
 
     def is_finished(self):
@@ -82,9 +104,10 @@ class LLMEngine:
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",
             })
-            for seq_id, token_ids in output:
-                outputs[seq_id] = token_ids
-                pbar.update(1)
+            for item in output:
+                outputs.setdefault(item.seq_id, []).append(item.token_id)
+                if item.finished:
+                    pbar.update(1)
         pbar.close()
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
