@@ -387,7 +387,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--engine-port", type=int, default=5555)
     parser.add_argument("--startup-timeout", type=float, default=1200.0)
     parser.add_argument("--max-pending-requests", type=int, default=1024)
-    parser.add_argument("--quantization", choices=["fp8"])
+    parser.add_argument("--quantization", choices=["fp8", "gptq"])
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--device-ids", type=_parse_device_ids)
     parser.add_argument("--master-port", type=int, default=2333)

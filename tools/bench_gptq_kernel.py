@@ -70,7 +70,9 @@ def main():
         bf16_ms = measure(bf16_fn, args.warmup, args.repeats)
         expected = bf16_fn()
         actual = gptq_fn()
-        max_abs_error = (actual - expected).abs().max().item()
+        error = (actual - expected).float()
+        max_abs_error = error.abs().max().item()
+        relative_l2_error = error.norm().div(expected.float().norm()).item()
         flops = 2 * m * args.k * args.n
         packed_bytes = (
             qweight.numel() * qweight.element_size()
@@ -78,6 +80,8 @@ def main():
             + qzeros.numel() * qzeros.element_size()
             + g_idx.numel() * g_idx.element_size()
         )
+        bf16_weight_bytes = args.k * args.n * torch.bfloat16.itemsize
+        compression_ratio = bf16_weight_bytes / packed_bytes
         rows.append(
             {
                 "m": m,
@@ -89,6 +93,10 @@ def main():
                 "gptq_tflops": flops / (gptq_ms * 1e9),
                 "effective_weight_gb_s": packed_bytes / (gptq_ms * 1e6),
                 "max_abs_error": max_abs_error,
+                "relative_l2_error": relative_l2_error,
+                "packed_weight_bytes": packed_bytes,
+                "bf16_weight_bytes": bf16_weight_bytes,
+                "weight_compression_ratio": compression_ratio,
             }
         )
     print(json.dumps({"ordered_g_idx": args.ordered_g_idx, "results": rows}, indent=2))

@@ -10,7 +10,7 @@ from nanovllm import LLM, SamplingParams
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
-    parser.add_argument("--quantization", choices=["fp8"])
+    parser.add_argument("--quantization", choices=["fp8", "gptq"])
     parser.add_argument("--max-tokens", type=int, default=128)
     args = parser.parse_args()
 

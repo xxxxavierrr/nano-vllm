@@ -53,6 +53,28 @@ model's original dtype:
 llm = LLM("/YOUR/MODEL/PATH", quantization="fp8", enforce_eager=True)
 ```
 
+## GPTQ W4A16
+
+GPTQ checkpoints are auto-detected from their Hugging Face
+`quantization_config`; `quantization="gptq"` and `--quantization gptq` are
+also accepted. The v1 path requires 4-bit symmetric INT32 packing,
+`group_size=128`, BF16 activations, and tensor parallel size 1. Linear layers
+keep `qweight`, `scales`, `qzeros`, and `g_idx` packed on GPU and never
+materialize a full BF16 weight.
+
+The v1 Triton kernel reads the original `g_idx` directly. Fused QKV and
+gate/up projections are loaded only when every source shard has an identical
+`g_idx`; a mismatch is rejected instead of silently overwriting metadata.
+
+Run the implementation-independent kernel comparison with:
+
+```bash
+python tools/bench_gptq_kernel.py
+```
+
+The current model runtime still implements the Qwen3 architecture. Qwen3.6
+uses the Qwen3.5 architecture and will be connected in a later milestone.
+
 ## OpenAI-Compatible Serving
 
 Install the optional serving dependencies and start the API server with one
@@ -137,8 +159,9 @@ python bench.py /YOUR/MODEL/PATH \
 ```
 
 Use `--request-rate inf` for offline maximum throughput, or a finite request
-rate for Poisson arrivals. Add `--quantization fp8` to benchmark FP8 and use
-`--ttft-slo-ms`, `--tpot-slo-ms`, or `--e2e-slo-ms` to report SLO goodput.
+rate for Poisson arrivals. Add `--quantization fp8` or `--quantization gptq`
+to select a quantized checkpoint and use `--ttft-slo-ms`, `--tpot-slo-ms`, or
+`--e2e-slo-ms` to report SLO goodput.
 
 ### Online serving benchmark
 

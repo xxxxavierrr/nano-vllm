@@ -96,7 +96,7 @@ def parse_args(argv: list[str] | None = None):
         help=f"Local Hugging Face model directory (default: {DEFAULT_MODEL})",
     )
     parser.add_argument("--label", default="nano-vllm")
-    parser.add_argument("--quantization", choices=["fp8"])
+    parser.add_argument("--quantization", choices=["fp8", "gptq"])
     parser.add_argument("--num-requests", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=256)
     parser.add_argument("--output-len", type=int, default=128)

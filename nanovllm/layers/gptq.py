@@ -1,11 +1,59 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 
 
 GPTQ_BITS = 4
 GPTQ_VALUES_PER_INT32 = 32 // GPTQ_BITS
+
+
+@dataclass(frozen=True, slots=True)
+class GPTQConfig:
+    bits: int = GPTQ_BITS
+    group_size: int = 128
+    sym: bool = True
+    desc_act: bool = False
+    pack_dtype: str = "int32"
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "GPTQConfig":
+        method = value.get("quant_method", value.get("format", "gptq"))
+        checkpoint_format = value.get("checkpoint_format", value.get("format", "gptq"))
+        if str(method).lower() != "gptq" or str(checkpoint_format).lower() != "gptq":
+            raise ValueError(
+                "only GPTQ checkpoint format is supported, got "
+                f"quant_method={method!r}, checkpoint_format={checkpoint_format!r}"
+            )
+        config = cls(
+            bits=int(value.get("bits", GPTQ_BITS)),
+            group_size=int(value.get("group_size", 128)),
+            sym=bool(value.get("sym", True)),
+            desc_act=bool(value.get("desc_act", False)),
+            pack_dtype=str(value.get("pack_dtype", "int32")).lower(),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.bits != GPTQ_BITS:
+            raise ValueError(f"GPTQ v1 requires 4 bits, got {self.bits}")
+        if self.group_size != 128:
+            raise ValueError(
+                f"GPTQ v1 requires group_size=128, got {self.group_size}"
+            )
+        if not self.sym:
+            raise ValueError("GPTQ v1 requires symmetric quantization")
+        if self.pack_dtype not in ("int32", "torch.int32"):
+            raise ValueError(
+                f"GPTQ v1 requires int32 packing, got {self.pack_dtype!r}"
+            )
+
+    @property
+    def values_per_int32(self) -> int:
+        return 32 // self.bits
 
 
 def _unpack_int4(packed: torch.Tensor, dim: int) -> torch.Tensor:
