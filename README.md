@@ -36,7 +36,7 @@ huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
 See `example.py` for usage. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
 ```python
 from nanovllm import LLM, SamplingParams
-llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True, tensor_parallel_size=1)
+llm = LLM("/YOUR/MODEL/PATH", tensor_parallel_size=1)
 sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
 prompts = ["Hello, Nano-vLLM."]
 outputs = llm.generate(prompts, sampling_params)
@@ -98,13 +98,33 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
+## CUDA Graph modes
+
+`FULL_AND_PIECEWISE` is the default execution mode. Uniform decode batches use
+the existing full-model CUDA Graph. Prefill and mixed batches up to 512
+scheduled tokens use Piecewise CUDA Graphs with attention and KV-cache updates
+left eager; larger batches fall back to eager execution.
+
+Use `cudagraph_mode="FULL_DECODE_ONLY"`, `"PIECEWISE"`, or `"NONE"` when
+constructing `LLM`. The server and offline benchmark expose the equivalent
+`--cudagraph-mode` and `--piecewise-max-tokens` options. `enforce_eager=True`
+and `--enforce-eager` remain aliases for `NONE`. The server convenience script
+also accepts the `CUDAGRAPH_MODE` and `PIECEWISE_MAX_TOKENS` environment
+variables.
+
+Capturing all buckets through 512 deliberately moves compilation work into
+startup so the first online request does not compile a new graph. For faster
+development restarts, lower `piecewise_max_tokens`; production startup should
+allow several minutes for the one-time capture.
+
 ## Benchmark
 
 `bench.py` provides an in-process synthetic benchmark with offline burst or
 rate-controlled arrivals, concurrency limits, reproducible length distributions,
 shared prefixes, SLO goodput, and JSON output. It reports request/input/output/
 total throughput, TTFT, TPOT, ITL, E2E latency percentiles, prefill/decode
-throughput, scheduler behavior, prefix-cache hits, and GPU memory.
+throughput, scheduler behavior, prefix-cache hits, GPU memory, and per-mode
+`FULL`/`PIECEWISE`/`EAGER` step, token, and timing counters.
 
 On the development GPU, `bench.py` can be run directly without arguments; it
 defaults to `/root/autodl-tmp/huggingface/Qwen3-0.6B` and the settings shown by

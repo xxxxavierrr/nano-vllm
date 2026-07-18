@@ -1,10 +1,20 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.utils.context import get_context
+
+
+class KVCacheHandle:
+    """Keep a stable module attribute while the cache tensor is allocated later."""
+
+    __slots__ = ("tensor",)
+
+    def __init__(self, tensor: torch.Tensor):
+        self.tensor = tensor
 
 
 @triton.jit
@@ -54,11 +64,20 @@ class Attention(nn.Module):
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
-        self.k_cache = self.v_cache = torch.tensor([])
+        self.k_cache = KVCacheHandle(torch.tensor([]))
+        self.v_cache = KVCacheHandle(torch.tensor([]))
 
+    @torch.compiler.disable
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
-        k_cache, v_cache = self.k_cache, self.v_cache
+        num_actual_tokens = context.num_actual_tokens or q.size(0)
+        num_padded_tokens = q.size(0) - num_actual_tokens
+        if num_padded_tokens < 0:
+            raise ValueError("attention received fewer tokens than the unpadded batch size")
+        q = q[:num_actual_tokens]
+        k = k[:num_actual_tokens]
+        v = v[:num_actual_tokens]
+        k_cache, v_cache = self.k_cache.tensor, self.v_cache.tensor
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_uniform_decode:
@@ -72,4 +91,6 @@ class Attention(nn.Module):
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+        if num_padded_tokens:
+            o = F.pad(o, (0, 0, 0, 0, 0, num_padded_tokens))
         return o

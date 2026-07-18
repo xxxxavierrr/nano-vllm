@@ -18,7 +18,12 @@ async def smoke(args):
             endpoint,
             args.model,
             {
-                "enforce_eager": True,
+                "enforce_eager": args.enforce_eager,
+                "cudagraph_mode": args.cudagraph_mode,
+                "piecewise_max_tokens": args.piecewise_max_tokens,
+                "max_num_batched_tokens": args.max_num_batched_tokens,
+                "max_num_seqs": args.max_num_seqs,
+                "max_model_len": args.max_model_len,
                 "gpu_memory_utilization": args.gpu_memory_utilization,
                 "master_port": args.master_port,
                 "shm_name": f"nanovllm-smoke-{uuid4().hex}",
@@ -71,7 +76,17 @@ def main():
     parser.add_argument("--engine-port", type=int, default=5560)
     parser.add_argument("--master-port", type=int, default=2334)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.5)
-    parser.add_argument("--startup-timeout", type=float, default=120.0)
+    parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--cudagraph-mode",
+        choices=["FULL_AND_PIECEWISE", "FULL_DECODE_ONLY", "PIECEWISE", "NONE"],
+        default="FULL_AND_PIECEWISE",
+    )
+    parser.add_argument("--piecewise-max-tokens", type=int, default=512)
+    parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
+    parser.add_argument("--max-num-seqs", type=int, default=512)
+    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--startup-timeout", type=float, default=1200.0)
     args = parser.parse_args()
     asyncio.run(smoke(args))
 

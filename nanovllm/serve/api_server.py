@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import AutoConfig, AutoTokenizer
 import uvicorn
 
+from nanovllm.engine.cudagraph import CUDAGraphMode
 from nanovllm.serve.engine import (
     EngineClient,
     EngineRequest,
@@ -384,7 +385,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--engine-host", default="127.0.0.1")
     parser.add_argument("--engine-port", type=int, default=5555)
-    parser.add_argument("--startup-timeout", type=float, default=300.0)
+    parser.add_argument("--startup-timeout", type=float, default=1200.0)
     parser.add_argument("--max-pending-requests", type=int, default=1024)
     parser.add_argument("--quantization", choices=["fp8"])
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
@@ -396,6 +397,12 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--cudagraph-mode",
+        choices=[mode.value for mode in CUDAGraphMode],
+        default=CUDAGraphMode.FULL_AND_PIECEWISE.value,
+    )
+    parser.add_argument("--piecewise-max-tokens", type=int, default=512)
     args = parser.parse_args(argv)
     if not Path(args.model).is_dir():
         parser.error(f"model directory does not exist: {args.model}")
@@ -409,6 +416,8 @@ def parse_args(argv: list[str] | None = None):
         parser.error("--device-ids count must match --tensor-parallel-size")
     if args.max_pending_requests <= 0:
         parser.error("--max-pending-requests must be positive")
+    if args.piecewise_max_tokens <= 0:
+        parser.error("--piecewise-max-tokens must be positive")
     return args
 
 
@@ -427,6 +436,8 @@ def main(argv: list[str] | None = None):
         "max_model_len": args.max_model_len,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "enforce_eager": args.enforce_eager,
+        "cudagraph_mode": args.cudagraph_mode,
+        "piecewise_max_tokens": args.piecewise_max_tokens,
     }
     settings = ServerSettings(
         model=args.model,

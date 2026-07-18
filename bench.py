@@ -13,6 +13,7 @@ from time import perf_counter
 import torch
 
 from nanovllm import LLM, SamplingParams
+from nanovllm.engine.cudagraph import CUDAGraphMode, ExecutionMode
 
 
 DEFAULT_MODEL = "/root/autodl-tmp/huggingface/Qwen3-0.6B"
@@ -114,6 +115,12 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--cudagraph-mode",
+        choices=[mode.value for mode in CUDAGraphMode],
+        default=CUDAGraphMode.FULL_AND_PIECEWISE.value,
+    )
+    parser.add_argument("--piecewise-max-tokens", type=int, default=512)
     parser.add_argument("--ttft-slo-ms", type=float)
     parser.add_argument("--tpot-slo-ms", type=float)
     parser.add_argument("--e2e-slo-ms", type=float)
@@ -136,6 +143,8 @@ def parse_args(argv: list[str] | None = None):
         parser.error("--max-concurrency cannot be negative")
     if not 1 <= args.master_port <= 65535:
         parser.error("--master-port must be between 1 and 65535")
+    if args.piecewise_max_tokens <= 0:
+        parser.error("--piecewise-max-tokens must be positive")
     return args
 
 
@@ -151,6 +160,8 @@ def main(argv: list[str] | None = None):
         enforce_eager=args.enforce_eager,
         tensor_parallel_size=args.tensor_parallel_size,
         master_port=args.master_port,
+        cudagraph_mode=args.cudagraph_mode,
+        piecewise_max_tokens=args.piecewise_max_tokens,
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_model_len=args.max_model_len,
@@ -188,6 +199,10 @@ def main(argv: list[str] | None = None):
     mixed_seconds = 0.0
     mixed_tokens = 0
     mixed_steps = 0
+    execution_mode_stats = {
+        mode.value: {"steps": 0, "seconds": 0.0, "tokens": 0}
+        for mode in ExecutionMode
+    }
     max_batch_size = 0
     max_batched_tokens = 0
     arrival_rng = random.Random(args.seed + 1)
@@ -230,6 +245,11 @@ def main(argv: list[str] | None = None):
         llm.scheduler.postprocess(batch, token_ids)
         step_finished = perf_counter()
         step_seconds = step_finished - step_started
+        execution_mode = llm.model_runner.last_execution_mode
+        mode_stats = execution_mode_stats[execution_mode]
+        mode_stats["steps"] += 1
+        mode_stats["seconds"] += step_seconds
+        mode_stats["tokens"] += scheduled_tokens
 
         max_batch_size = max(max_batch_size, len(seqs))
         max_batched_tokens = max(max_batched_tokens, scheduled_tokens)
@@ -319,6 +339,8 @@ def main(argv: list[str] | None = None):
             "tensor_parallel_size": args.tensor_parallel_size,
             "master_port": args.master_port,
             "enforce_eager": args.enforce_eager,
+            "cudagraph_mode": config.cudagraph_mode.value,
+            "piecewise_max_tokens": config.piecewise_max_tokens,
             "max_num_seqs": args.max_num_seqs,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_model_len": args.max_model_len,
@@ -370,6 +392,15 @@ def main(argv: list[str] | None = None):
                 "tokens": mixed_tokens,
                 "token_per_s": mixed_tokens / mixed_seconds if mixed_seconds else 0.0,
             },
+        },
+        "execution_modes": {
+            mode: {
+                **stats,
+                "token_per_s": stats["tokens"] / stats["seconds"]
+                if stats["seconds"]
+                else 0.0,
+            }
+            for mode, stats in execution_mode_stats.items()
         },
         "scheduler": {
             "preemptions": llm.scheduler.num_preemptions,
@@ -439,6 +470,11 @@ def main(argv: list[str] | None = None):
         f"Mixed:   {mixed_tokens} tok / {mixed_seconds:.3f}s = "
         f"{result['phases']['mixed']['token_per_s']:.2f} tok/s"
     )
+    for mode, stats in result["execution_modes"].items():
+        print(
+            f"{mode:<9} {stats['tokens']} tok / {stats['seconds']:.3f}s = "
+            f"{stats['token_per_s']:.2f} tok/s ({stats['steps']} steps)"
+        )
     print(
         f"Max batch: {max_batch_size}  Max batched tokens: {max_batched_tokens}  "
         f"Preemptions: {llm.scheduler.num_preemptions}  Prefix cache hit: "

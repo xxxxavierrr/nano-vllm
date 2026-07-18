@@ -59,6 +59,7 @@ def normalize_offline_result(result: dict, metadata: dict[str, str]) -> dict:
             "system": result["system"],
             "engine": result["engine"],
             "phases": result["phases"],
+            "execution_modes": result.get("execution_modes", {}),
             "scheduler": scheduler,
             "memory": result["memory"],
             "startup": result["startup"],

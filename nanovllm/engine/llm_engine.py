@@ -25,6 +25,7 @@ class EngineOutput:
 class EngineStepStats:
     prefill_tokens: int
     decode_tokens: int
+    execution_mode: str
 
     @property
     def total_tokens(self) -> int:
@@ -93,7 +94,11 @@ class LLMEngine:
             for seq in batch.sequences
             if seq.num_completion_tokens > previous_completion_tokens[seq.seq_id]
         ]
-        return outputs, EngineStepStats(batch.prefill_tokens, batch.decode_tokens)
+        return outputs, EngineStepStats(
+            batch.prefill_tokens,
+            batch.decode_tokens,
+            self.model_runner.last_execution_mode,
+        )
 
     def is_finished(self):
         return self.scheduler.is_finished()

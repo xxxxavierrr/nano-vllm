@@ -137,3 +137,4 @@ def test_offline_result_uses_the_shared_outer_schema():
     assert result["metadata"]["quantization"] == "fp8"
     assert result["metrics"]["tokens"]["cached"] == 8
     assert result["engine_metrics"]["engine"]["model"] == "/model"
+    assert result["engine_metrics"]["execution_modes"] == {}

@@ -5,6 +5,14 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
+from nanovllm.engine.cudagraph import (
+    BatchDescriptor,
+    CUDAGraphDispatcher,
+    CUDAGraphMode,
+    ExecutionMode,
+    make_full_capture_sizes,
+    make_piecewise_capture_sizes,
+)
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
@@ -19,7 +27,8 @@ class ModelRunner:
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
-        self.enforce_eager = config.enforce_eager
+        self.cudagraph_mode = CUDAGraphMode.parse(config.cudagraph_mode)
+        self.enforce_eager = self.cudagraph_mode is CUDAGraphMode.NONE
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
@@ -35,11 +44,59 @@ class ModelRunner:
         if config.quantization == "fp8":
             quantize_fp8(self.model)
             torch.cuda.empty_cache()
+        # Compile and replay with the same ambient default device used by
+        # steady-state engine steps. All persistent GPU tensors below specify
+        # their device explicitly.
+        torch.set_default_device("cpu")
+        torch.set_default_dtype(default_dtype)
         self.sampler = Sampler()
-        self.warmup_model()
+        max_full_batch_size = min(self.config.max_num_seqs, 512)
+        max_piecewise_tokens = min(
+            self.config.piecewise_max_tokens,
+            self.config.max_num_batched_tokens,
+        )
+        self.full_capture_sizes = make_full_capture_sizes(max_full_batch_size)
+        self.piecewise_capture_sizes = make_piecewise_capture_sizes(max_piecewise_tokens)
+        self.cudagraph_dispatcher = CUDAGraphDispatcher(
+            self.cudagraph_mode,
+            self.full_capture_sizes,
+            self.piecewise_capture_sizes,
+        )
+        self.last_execution_mode = ExecutionMode.EAGER.value
+        self.piecewise_model = None
+        if self.cudagraph_mode.uses_piecewise:
+            try:
+                self.piecewise_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=False,
+                    mode="reduce-overhead",
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "failed to initialize Piecewise CUDA Graph compilation; "
+                    "use cudagraph_mode=NONE or enforce_eager=True to disable it"
+                ) from exc
+        try:
+            self.warmup_model()
+            if self.cudagraph_mode.uses_piecewise:
+                self.capture_piecewise_cudagraphs()
+        except Exception as exc:
+            if self.cudagraph_mode.uses_piecewise:
+                raise RuntimeError(
+                    "failed to compile or capture Piecewise CUDA Graphs; use "
+                    "cudagraph_mode=NONE or enforce_eager=True to disable them"
+                ) from exc
+            raise
         self.allocate_kv_cache()
-        if not self.enforce_eager:
-            self.capture_cudagraph()
+        if self.cudagraph_mode.uses_full:
+            try:
+                self.capture_cudagraph()
+            except Exception as exc:
+                raise RuntimeError(
+                    "failed to capture Full CUDA Graphs; use "
+                    "cudagraph_mode=NONE or enforce_eager=True to disable them"
+                ) from exc
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -58,8 +115,10 @@ class ModelRunner:
             dist.barrier()
             if self.rank == 0:
                 self.shm.unlink()
-        if not self.enforce_eager:
+        if hasattr(self, "graphs"):
             del self.graphs, self.graph_pool
+        if self.piecewise_model is not None:
+            del self.piecewise_model
         torch.cuda.synchronize()
         dist.destroy_process_group()
 
@@ -117,12 +176,21 @@ class ModelRunner:
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
-        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+        self.kv_cache = torch.empty(
+            2,
+            hf_config.num_hidden_layers,
+            config.num_kvcache_blocks,
+            self.block_size,
+            num_kv_heads,
+            head_dim,
+            dtype=hf_config.dtype,
+            device="cuda",
+        )
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = self.kv_cache[0, layer_id]
-                module.v_cache = self.kv_cache[1, layer_id]
+                module.k_cache.tensor = self.kv_cache[0, layer_id]
+                module.v_cache.tensor = self.kv_cache[1, layer_id]
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
@@ -131,7 +199,7 @@ class ModelRunner:
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
-    def prepare_inputs(self, seqs: list[Sequence]):
+    def prepare_inputs(self, seqs: list[Sequence], descriptor: BatchDescriptor):
         input_ids = []
         positions = []
         cu_seqlens_q = [0]
@@ -182,10 +250,27 @@ class ModelRunner:
                 else:
                     slot_end = seq.block_table[i] * self.block_size + end - i * self.block_size
                 slot_mapping.extend(range(slot_start, slot_end))
+        num_actual_tokens = len(input_ids)
+        if num_actual_tokens != descriptor.num_tokens:
+            raise ValueError(
+                f"dispatcher expected {descriptor.num_tokens} tokens, prepared {num_actual_tokens}"
+            )
+        model_num_tokens = (
+            descriptor.num_padded_tokens
+            if descriptor.execution_mode is ExecutionMode.PIECEWISE
+            else num_actual_tokens
+        )
+        num_padding_tokens = model_num_tokens - num_actual_tokens
+        if num_padding_tokens < 0:
+            raise ValueError("CUDA Graph bucket is smaller than the real token batch")
+        input_ids.extend([0] * num_padding_tokens)
+        positions.extend([0] * num_padding_tokens)
         block_tables = self.prepare_block_tables(seqs) if use_kv_cache else None
         is_uniform_decode = use_kv_cache and all(
             seq.num_scheduled_tokens == 1 and not seq.is_prefill for seq in seqs
         )
+        if is_uniform_decode != descriptor.uniform_decode:
+            raise ValueError("dispatcher and prepared attention metadata disagree on batch shape")
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -204,8 +289,10 @@ class ModelRunner:
             context_lens=context_lens,
             use_kv_cache=use_kv_cache,
             is_uniform_decode=is_uniform_decode,
+            num_actual_tokens=num_actual_tokens,
+            num_padded_tokens=model_num_tokens,
         )
-        return input_ids, positions, is_uniform_decode
+        return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
         temperatures = [seq.temperature for seq in seqs]
@@ -213,13 +300,23 @@ class ModelRunner:
         return temperatures
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_uniform_decode: bool):
-        if not is_uniform_decode or self.enforce_eager or input_ids.size(0) > 512:
+    def run_model(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        descriptor: BatchDescriptor,
+    ):
+        if descriptor.execution_mode is ExecutionMode.EAGER:
             return self.model(input_ids, positions)
-        else:
-            bs = input_ids.size(0)
+        if descriptor.execution_mode is ExecutionMode.PIECEWISE:
+            if self.piecewise_model is None:
+                raise RuntimeError("Piecewise CUDA Graph model is not initialized")
+            torch.compiler.cudagraph_mark_step_begin()
+            return self.piecewise_model(input_ids, positions)
+        if descriptor.execution_mode is ExecutionMode.FULL:
+            bs = descriptor.num_tokens
             context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+            graph = self.graphs[descriptor.num_padded_tokens]
             graph_vars = self.graph_vars
             graph_vars["input_ids"][:bs] = input_ids
             graph_vars["positions"][:bs] = positions
@@ -231,12 +328,24 @@ class ModelRunner:
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
             graph.replay()
             return graph_vars["outputs"][:bs]
+        raise ValueError(f"unsupported execution mode: {descriptor.execution_mode}")
 
+    @torch.inference_mode()
     def run(self, seqs: list[Sequence]) -> list[int]:
         sampled_seqs = [seq for seq in seqs if seq.will_sample]
-        input_ids, positions, is_uniform_decode = self.prepare_inputs(seqs)
+        num_tokens = sum(seq.num_scheduled_tokens for seq in seqs)
+        is_uniform_decode = all(
+            seq.num_scheduled_tokens == 1 and not seq.is_prefill for seq in seqs
+        )
+        descriptor = self.cudagraph_dispatcher.dispatch(
+            num_tokens,
+            len(seqs),
+            is_uniform_decode,
+        )
+        input_ids, positions = self.prepare_inputs(seqs, descriptor)
         try:
-            hidden_states = self.run_model(input_ids, positions, is_uniform_decode)
+            hidden_states = self.run_model(input_ids, positions, descriptor)
+            self.last_execution_mode = descriptor.execution_mode.value
             if not sampled_seqs:
                 return [] if self.rank == 0 else None
             temperatures = self.prepare_sample(sampled_seqs) if self.rank == 0 else None
@@ -246,18 +355,53 @@ class ModelRunner:
             reset_context()
 
     @torch.inference_mode()
+    def capture_piecewise_cudagraphs(self):
+        if self.piecewise_model is None:
+            return
+        for size in reversed(self.piecewise_capture_sizes):
+            input_ids = torch.zeros(size, dtype=torch.int64, device="cuda")
+            positions = torch.arange(size, dtype=torch.int64, device="cuda")
+            cu_seqlens = torch.tensor([0, size], dtype=torch.int32, device="cuda")
+            set_context(
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=size,
+                max_seqlen_k=size,
+                num_actual_tokens=size,
+                num_padded_tokens=size,
+            )
+            try:
+                for _ in range(2):
+                    torch.compiler.cudagraph_mark_step_begin()
+                    outputs = self.piecewise_model(input_ids, positions)
+                    del outputs
+                torch.cuda.synchronize()
+            finally:
+                reset_context()
+
+    @torch.inference_mode()
     def capture_cudagraph(self):
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
-        input_ids = torch.zeros(max_bs, dtype=torch.int64)
-        positions = torch.zeros(max_bs, dtype=torch.int64)
-        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
-        context_lens = torch.zeros(max_bs, dtype=torch.int32)
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
-        outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        input_ids = torch.zeros(max_bs, dtype=torch.int64, device="cuda")
+        positions = torch.zeros(max_bs, dtype=torch.int64, device="cuda")
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+        context_lens = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+        block_tables = torch.zeros(
+            max_bs,
+            max_num_blocks,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        outputs = torch.zeros(
+            max_bs,
+            hf_config.hidden_size,
+            dtype=hf_config.dtype,
+            device="cuda",
+        )
+        self.graph_bs = self.full_capture_sizes
         self.graphs = {}
         self.graph_pool = None
 
@@ -269,6 +413,8 @@ class ModelRunner:
                 block_tables=block_tables[:bs],
                 use_kv_cache=True,
                 is_uniform_decode=True,
+                num_actual_tokens=bs,
+                num_padded_tokens=bs,
             )
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):

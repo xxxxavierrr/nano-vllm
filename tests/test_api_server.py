@@ -2,7 +2,12 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from nanovllm.serve.api_server import ServerSettings, _stream_chat_completion, create_app
+from nanovllm.serve.api_server import (
+    ServerSettings,
+    _stream_chat_completion,
+    create_app,
+    parse_args,
+)
 from nanovllm.serve.engine import RequestQueueFullError
 from nanovllm.serve.protocol import MessageType
 
@@ -56,6 +61,22 @@ class FakeRuntime:
 def make_client(runtime=None):
     settings = ServerSettings(model="unused", served_model_name="test-model")
     return TestClient(create_app(settings, runtime=runtime or FakeRuntime()))
+
+
+def test_graph_cli_defaults_and_explicit_eager_flag(tmp_path):
+    defaults = parse_args(["--model", str(tmp_path)])
+    assert defaults.cudagraph_mode == "FULL_AND_PIECEWISE"
+    assert defaults.piecewise_max_tokens == 512
+    assert defaults.startup_timeout == 1200.0
+
+    eager = parse_args([
+        "--model",
+        str(tmp_path),
+        "--enforce-eager",
+        "--cudagraph-mode",
+        "PIECEWISE",
+    ])
+    assert eager.enforce_eager is True
 
 
 def test_non_streaming_chat_completion():
