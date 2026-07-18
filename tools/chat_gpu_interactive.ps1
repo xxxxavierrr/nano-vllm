@@ -1,14 +1,16 @@
 param(
-    [Parameter(Position = 0)]
-    [string]$Prompt = "Hello, introduce yourself in one sentence.",
     [string]$SshHost = "gpu",
     [int]$LocalPort = 8000,
     [int]$RemotePort = 8000,
-    [string]$Model = "Qwen3-0.6B"
+    [string]$Model = "Qwen3-0.6B",
+    [int]$MaxTokens = 1024,
+    [double]$Temperature = 1.0,
+    [string]$SystemPrompt = "",
+    [switch]$Thinking
 )
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$clientPath = Join-Path $repoRoot "tools\chat_stream.py"
+$clientPath = Join-Path $repoRoot "tools\chat_interactive.py"
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $forward = "${LocalPort}:127.0.0.1:${RemotePort}"
 $tunnelLog = [System.IO.Path]::GetTempFileName()
@@ -57,8 +59,16 @@ try {
         $clientPath,
         "--base-url", "http://127.0.0.1:$LocalPort",
         "--model", $Model,
-        $Prompt
+        "--max-tokens", $MaxTokens,
+        "--temperature", $Temperature
     )
+    if ($SystemPrompt) {
+        $clientArgs += @("--system-prompt", $SystemPrompt)
+    }
+    if ($Thinking) {
+        $clientArgs += "--thinking"
+    }
+
     if (Test-Path -LiteralPath $venvPython) {
         & $venvPython @clientArgs
     }

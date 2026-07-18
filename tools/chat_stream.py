@@ -61,6 +61,9 @@ def main():
     except urllib.error.URLError as exc:
         print(f"Cannot connect to {args.base_url}: {exc.reason}", file=sys.stderr)
         raise SystemExit(1) from exc
+    except (ConnectionResetError, TimeoutError, OSError) as exc:
+        print(f"Connection to {args.base_url} was interrupted: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
