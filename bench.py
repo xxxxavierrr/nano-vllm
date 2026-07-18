@@ -86,7 +86,7 @@ def format_distribution(name: str, values: dict[str, float], unit: str = "ms"):
     )
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Comprehensive in-process nano-vLLM benchmark")
     parser.add_argument(
         "model",
@@ -118,7 +118,7 @@ def parse_args():
     parser.add_argument("--e2e-slo-ms", type=float)
     parser.add_argument("--output-json")
     parser.add_argument("--request-details", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.num_requests <= 0 or args.input_len <= 0 or args.output_len <= 0:
         parser.error("request count and token lengths must be positive")
@@ -136,8 +136,8 @@ def parse_args():
     return args
 
 
-def main():
-    args = parse_args()
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
@@ -442,6 +442,8 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"\nSaved JSON: {output_path}")
+
+    return result
 
 
 if __name__ == "__main__":

@@ -70,7 +70,12 @@ def test_non_streaming_chat_completion():
     payload = response.json()
     assert payload["choices"][0]["message"]["content"] == "hello world"
     assert payload["choices"][0]["finish_reason"] == "length"
-    assert payload["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    assert payload["usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
 
 
 def test_streaming_chat_completion_uses_openai_sse_frames():
@@ -88,6 +93,21 @@ def test_streaming_chat_completion_uses_openai_sse_frames():
     assert '"content":" world"' in response.text
     assert '"finish_reason":"length"' in response.text
     assert response.text.endswith("data: [DONE]\n\n")
+
+
+def test_streaming_chat_completion_can_include_usage():
+    with make_client() as client:
+        response = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "max_tokens": 2,
+        })
+
+    assert response.status_code == 200
+    assert '"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2' in response.text
+    assert '"prompt_tokens_details":{"cached_tokens":0}' in response.text
 
 
 def test_queue_full_returns_429_before_stream_starts():

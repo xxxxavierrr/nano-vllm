@@ -90,6 +90,7 @@ class BlockManager:
         for i in range(num_cached_blocks, seq.num_blocks):
             seq.block_table.append(self._allocate_block())
         seq.num_cached_tokens = num_cached_blocks * self.block_size
+        seq.num_prefix_cached_tokens = min(seq.num_cached_tokens, seq.num_prompt_tokens)
 
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):

@@ -120,6 +120,80 @@ Use `--request-rate inf` for offline maximum throughput, or a finite request
 rate for Poisson arrivals. Add `--quantization fp8` to benchmark FP8 and use
 `--ttft-slo-ms`, `--tpot-slo-ms`, or `--e2e-slo-ms` to report SLO goodput.
 
+### Online serving benchmark
+
+`bench_online.py` is a black-box OpenAI Chat Completions benchmark. It does not
+import nano-vLLM engine code, so the same client can test any compatible server
+and compare models, operators, tensor-parallel settings, or quantization modes.
+Install the small client dependency with `pip install -e ".[benchmark]"` and
+run the built-in smoke profile:
+
+```bash
+python bench_online.py --base-url http://127.0.0.1:8000 \
+  --model Qwen3-0.6B --profile smoke
+```
+
+Available profiles are `smoke`, `latency`, `throughput`, and `prefix_cache`.
+Every setting can be overridden from the command line:
+
+```bash
+python bench_online.py --base-url http://127.0.0.1:8000 \
+  --model Qwen3-0.6B --profile throughput \
+  --num-requests 100 --max-concurrency 16 --request-rate 8 \
+  --metadata framework=nano-vllm --metadata quantization=fp8 \
+  --output-json results/fp8-online.json --request-details
+```
+
+The benchmark reports request and token throughput, TTFT, TPOT, inter-chunk and
+end-to-end latency percentiles, client-side queueing, errors, SLO goodput, and
+prefix-cache usage when the server returns it. Synthetic input lengths are
+approximate across tokenizers; the result always records whether output token
+counts came from API usage or an SSE-chunk fallback.
+
+On Windows, run the same benchmark through a temporary SSH tunnel:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\bench_gpu.ps1 `
+  -Profile smoke -Model Qwen3-0.6B
+```
+
+### Unified benchmark entrypoint
+
+Use `benchmark.py` when automation needs to choose the execution boundary
+explicitly. Offline mode runs the nano-vLLM engine in-process and retains
+engine-only phase, scheduler, cache, and memory metrics:
+
+```bash
+python benchmark.py --mode offline /YOUR/MODEL/PATH \
+  --num-requests 64 --input-len 256 --output-len 128 \
+  --metadata quantization=bf16 --output-json results/offline.json
+```
+
+Online mode runs the implementation-independent OpenAI HTTP/SSE client:
+
+```bash
+python benchmark.py --mode online \
+  --base-url http://127.0.0.1:8000 --model Qwen3-0.6B \
+  --profile throughput --metadata quantization=bf16 \
+  --output-json results/online.json
+```
+
+Both modes write schema version 2 with common `mode`, `metadata`, `workload`,
+and `metrics` sections. Offline-only details are stored under `engine_metrics`.
+The original `bench.py` and `bench_online.py` entrypoints remain available.
+
+On the GPU server, the convenience wrapper selects the existing miniconda
+Python and the default Qwen3 model automatically:
+
+```bash
+tools/bench_server.sh online --profile smoke
+tools/bench_server.sh offline --num-requests 64 --input-len 256 --output-len 128
+```
+
+Offline mode requires exclusive access to the GPU. The wrapper refuses to
+start it while the online service is healthy, instead of unexpectedly killing
+the running server.
+
 **Test Configuration:**
 - Hardware: RTX 4070 Laptop (8GB)
 - Model: Qwen3-0.6B

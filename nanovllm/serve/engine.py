@@ -303,6 +303,7 @@ def run_engine_proc(endpoint: str, model: str, engine_kwargs: dict[str, Any]):
                             "type": MessageType.FINISHED,
                             "request_id": request_id,
                             "finish_reason": output.finish_reason,
+                            "cached_tokens": output.cached_tokens,
                         })
                         request_to_seq.pop(request_id, None)
                         seq_to_request.pop(output.seq_id, None)

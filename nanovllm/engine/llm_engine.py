@@ -18,6 +18,7 @@ class EngineOutput:
     token_id: int
     finished: bool
     finish_reason: str | None
+    cached_tokens: int
 
 
 class LLMEngine:
@@ -71,7 +72,13 @@ class LLMEngine:
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
         outputs = [
-            EngineOutput(seq.seq_id, seq.last_token, seq.is_finished, seq.finish_reason)
+            EngineOutput(
+                seq.seq_id,
+                seq.last_token,
+                seq.is_finished,
+                seq.finish_reason,
+                seq.num_prefix_cached_tokens,
+            )
             for seq in seqs
             if seq.num_completion_tokens > previous_completion_tokens[seq.seq_id]
         ]

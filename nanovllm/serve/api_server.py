@@ -35,6 +35,12 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class StreamOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_usage: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -44,6 +50,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int | None = Field(default=None, gt=0)
     max_completion_tokens: int | None = Field(default=None, gt=0)
     stream: bool = False
+    stream_options: StreamOptions | None = None
 
     @model_validator(mode="after")
     def validate_token_limits(self):
@@ -53,6 +60,8 @@ class ChatCompletionRequest(BaseModel):
             and self.max_tokens != self.max_completion_tokens
         ):
             raise ValueError("max_tokens and max_completion_tokens must match when both are provided")
+        if self.stream_options is not None and not self.stream:
+            raise ValueError("stream_options requires stream=true")
         return self
 
     @property
@@ -165,6 +174,8 @@ async def _stream_chat_completion(
     completion_id: str,
     created: int,
     model: str,
+    prompt_tokens: int = 0,
+    include_usage: bool = False,
 ):
     base = _completion_base(completion_id, created, model, "chat.completion.chunk")
     role_chunk = {
@@ -176,6 +187,7 @@ async def _stream_chat_completion(
         }],
     }
     token_ids: list[int] = []
+    cached_tokens = 0
     previous_text = ""
     try:
         yield _sse(role_chunk)
@@ -195,6 +207,7 @@ async def _stream_chat_completion(
                         }],
                     })
             elif event["type"] == MessageType.FINISHED:
+                cached_tokens = event.get("cached_tokens", 0)
                 yield _sse({
                     **base,
                     "choices": [{
@@ -203,6 +216,17 @@ async def _stream_chat_completion(
                         "finish_reason": event.get("finish_reason") or "stop",
                     }],
                 })
+        if include_usage:
+            yield _sse({
+                **base,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": len(token_ids),
+                    "total_tokens": prompt_tokens + len(token_ids),
+                    "prompt_tokens_details": {"cached_tokens": cached_tokens},
+                },
+            })
         yield "data: [DONE]\n\n"
     except EngineRequestError as exc:
         yield _sse({"error": {"message": str(exc), "type": "engine_error"}})
@@ -221,11 +245,13 @@ async def _collect_chat_completion(
 ):
     token_ids: list[int] = []
     finish_reason = "stop"
+    cached_tokens = 0
     async for event in engine_request.events():
         if event["type"] == MessageType.TOKEN:
             token_ids.append(event["token_id"])
         elif event["type"] == MessageType.FINISHED:
             finish_reason = event.get("finish_reason") or "stop"
+            cached_tokens = event.get("cached_tokens", 0)
     text = runtime.decode(token_ids)
     return {
         **_completion_base(completion_id, created, model, "chat.completion"),
@@ -238,6 +264,7 @@ async def _collect_chat_completion(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": len(token_ids),
             "total_tokens": prompt_tokens + len(token_ids),
+            "prompt_tokens_details": {"cached_tokens": cached_tokens},
         },
     }
 
@@ -319,6 +346,8 @@ def create_app(settings: ServerSettings, runtime: ServingRuntime | None = None) 
                     completion_id,
                     created,
                     settings.served_model_name,
+                    len(prompt_token_ids),
+                    bool(body.stream_options and body.stream_options.include_usage),
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

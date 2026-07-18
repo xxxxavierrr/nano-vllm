@@ -1,0 +1,139 @@
+import math
+from collections import Counter
+from statistics import fmean
+
+from benchmarks.models import RequestResult
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * p / 100
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] * (upper - position) + ordered[upper] * (position - lower)
+
+
+def distribution(values: list[float], scale: float = 1.0) -> dict[str, float]:
+    scaled = [value * scale for value in values]
+    if not scaled:
+        return {key: 0.0 for key in ("mean", "p50", "p90", "p95", "p99", "max")}
+    return {
+        "mean": fmean(scaled),
+        "p50": percentile(scaled, 50),
+        "p90": percentile(scaled, 90),
+        "p95": percentile(scaled, 95),
+        "p99": percentile(scaled, 99),
+        "max": max(scaled),
+    }
+
+
+def _max_concurrency(results: list[RequestResult]) -> int:
+    events = []
+    for result in results:
+        events.append((result.started_s, 1))
+        events.append((result.finished_s, -1))
+    active = maximum = 0
+    for _, delta in sorted(events, key=lambda event: (event[0], event[1])):
+        active += delta
+        maximum = max(maximum, active)
+    return maximum
+
+
+def summarize(
+    results: list[RequestResult],
+    ttft_slo_ms: float | None = None,
+    tpot_slo_ms: float | None = None,
+    e2e_slo_ms: float | None = None,
+) -> dict:
+    if not results:
+        raise ValueError("at least one benchmark result is required")
+    successful = [result for result in results if result.succeeded]
+    started = min(result.scheduled_s for result in results)
+    finished = max(result.finished_s for result in results)
+    duration = max(finished - started, 1e-12)
+
+    ttfts = [
+        result.first_content_s - result.started_s
+        for result in successful
+        if result.first_content_s is not None
+    ]
+    e2es = [result.finished_s - result.started_s for result in successful]
+    tpots = [
+        (result.chunk_times_s[-1] - result.first_content_s) / (result.completion_tokens - 1)
+        for result in successful
+        if result.first_content_s is not None and result.chunk_times_s and result.completion_tokens > 1
+    ]
+    chunk_intervals = [
+        current - previous
+        for result in successful
+        for previous, current in zip(result.chunk_times_s, result.chunk_times_s[1:])
+    ]
+    client_queue = [result.started_s - result.scheduled_s for result in results]
+
+    good_requests = 0
+    slo_enabled = any(value is not None for value in (ttft_slo_ms, tpot_slo_ms, e2e_slo_ms))
+    for result in successful:
+        ttft_ms = (
+            (result.first_content_s - result.started_s) * 1000
+            if result.first_content_s is not None
+            else math.inf
+        )
+        tpot_ms = (
+            (result.chunk_times_s[-1] - result.first_content_s) * 1000 / (result.completion_tokens - 1)
+            if result.first_content_s is not None and result.chunk_times_s and result.completion_tokens > 1
+            else 0.0
+        )
+        e2e_ms = (result.finished_s - result.started_s) * 1000
+        good_requests += int(
+            (ttft_slo_ms is None or ttft_ms <= ttft_slo_ms)
+            and (tpot_slo_ms is None or tpot_ms <= tpot_slo_ms)
+            and (e2e_slo_ms is None or e2e_ms <= e2e_slo_ms)
+        )
+
+    status_codes = Counter(str(result.status_code or "transport") for result in results if not result.succeeded)
+    token_sources = Counter(result.token_count_source for result in successful)
+    prompt_tokens = sum(result.prompt_tokens or 0 for result in successful)
+    completion_tokens = sum(result.completion_tokens for result in successful)
+    cached_tokens = sum(result.cached_tokens or 0 for result in successful)
+    return {
+        "duration_s": duration,
+        "requests": {
+            "total": len(results),
+            "successful": len(successful),
+            "failed": len(results) - len(successful),
+            "error_rate": (len(results) - len(successful)) / len(results),
+            "status_codes": dict(status_codes),
+            "max_observed_concurrency": _max_concurrency(results),
+        },
+        "tokens": {
+            "prompt": prompt_tokens,
+            "completion": completion_tokens,
+            "cached": cached_tokens,
+            "prefix_cache_hit_rate": cached_tokens / prompt_tokens if prompt_tokens else None,
+            "count_sources": dict(token_sources),
+        },
+        "throughput": {
+            "request_per_s": len(successful) / duration,
+            "output_token_per_s": completion_tokens / duration,
+            "total_token_per_s": (prompt_tokens + completion_tokens) / duration,
+        },
+        "latency_ms": {
+            "ttft": distribution(ttfts, 1000),
+            "tpot": distribution(tpots, 1000),
+            "inter_chunk": distribution(chunk_intervals, 1000),
+            "e2e": distribution(e2es, 1000),
+            "client_queue": distribution(client_queue, 1000),
+        },
+        "slo": {
+            "enabled": slo_enabled,
+            "ttft_ms": ttft_slo_ms,
+            "tpot_ms": tpot_slo_ms,
+            "e2e_ms": e2e_slo_ms,
+            "good_requests": good_requests if slo_enabled else None,
+            "goodput_request_per_s": good_requests / duration if slo_enabled else None,
+        },
+    }

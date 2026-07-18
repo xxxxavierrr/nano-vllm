@@ -1,0 +1,10 @@
+{
+  "num_requests": 32,
+  "max_concurrency": 8,
+  "request_rate": "Infinity",
+  "input_len": 640,
+  "output_len": 64,
+  "shared_prefix_len": 512,
+  "temperature": 0.01,
+  "warmup_requests": 2
+}
