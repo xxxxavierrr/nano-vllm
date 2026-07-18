@@ -43,9 +43,37 @@ outputs = llm.generate(prompts, sampling_params)
 outputs[0]["text"]
 ```
 
+## FP8 Quantization
+
+On GPUs with native FP8 support, linear weights and activations can be quantized
+to FP8 while embeddings, normalization, logits, and the KV cache remain in the
+model's original dtype:
+
+```python
+llm = LLM("/YOUR/MODEL/PATH", quantization="fp8", enforce_eager=True)
+```
+
 ## Benchmark
 
-See `bench.py` for benchmark.
+`bench.py` provides an in-process synthetic benchmark with offline burst or
+rate-controlled arrivals, concurrency limits, reproducible length distributions,
+shared prefixes, SLO goodput, and JSON output. It reports request/input/output/
+total throughput, TTFT, TPOT, ITL, E2E latency percentiles, prefill/decode
+throughput, scheduler behavior, prefix-cache hits, and GPU memory.
+
+On the development GPU, `bench.py` can be run directly without arguments; it
+defaults to `/root/autodl-tmp/huggingface/Qwen3-0.6B` and the settings shown by
+`python bench.py --help`.
+
+```bash
+python bench.py /YOUR/MODEL/PATH \
+  --num-requests 64 --input-len 256 --output-len 128 \
+  --max-concurrency 16 --output-json results/benchmark.json
+```
+
+Use `--request-rate inf` for offline maximum throughput, or a finite request
+rate for Poisson arrivals. Add `--quantization fp8` to benchmark FP8 and use
+`--ttft-slo-ms`, `--tpot-slo-ms`, or `--e2e-slo-ms` to report SLO goodput.
 
 **Test Configuration:**
 - Hardware: RTX 4070 Laptop (8GB)

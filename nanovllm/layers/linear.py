@@ -24,6 +24,7 @@ class LinearBase(nn.Module):
         self.tp_size = dist.get_world_size()
         self.weight = nn.Parameter(torch.empty(output_size, input_size))
         self.weight.weight_loader = self.weight_loader
+        self.register_buffer("weight_scale", None, persistent=False)
         if bias:
             self.bias = nn.Parameter(torch.empty(output_size))
             self.bias.weight_loader = self.weight_loader
@@ -32,6 +33,38 @@ class LinearBase(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
+
+    def quantize_fp8(self):
+        fp8_dtype = torch.float8_e4m3fn
+        fp8_max = torch.finfo(fp8_dtype).max
+        scale = self.weight.detach().abs().amax(dim=1, keepdim=True).float()
+        scale = scale.clamp_min(1e-12).div_(fp8_max)
+        weight = self.weight.detach().div(scale).to(fp8_dtype)
+        self.weight = nn.Parameter(weight, requires_grad=False)
+        self.weight_scale = scale
+
+    def linear(self, x: torch.Tensor, use_bias: bool = True) -> torch.Tensor:
+        if self.weight_scale is None:
+            return F.linear(x, self.weight, self.bias if use_bias else None)
+
+        input_shape = x.shape
+        output_dtype = x.dtype
+        x = x.reshape(-1, input_shape[-1])
+        fp8_dtype = torch.float8_e4m3fn
+        fp8_max = torch.finfo(fp8_dtype).max
+        input_scale = x.abs().amax(dim=1, keepdim=True).float()
+        input_scale = input_scale.clamp_min(1e-12).div_(fp8_max)
+        x = x.div(input_scale).to(fp8_dtype)
+        output = torch._scaled_mm(
+            x,
+            self.weight.t(),
+            scale_a=input_scale,
+            scale_b=self.weight_scale.t(),
+            out_dtype=output_dtype,
+        )
+        if use_bias and self.bias is not None:
+            output.add_(self.bias)
+        return output.reshape(*input_shape[:-1], self.weight.shape[0])
 
 
 class ReplicatedLinear(LinearBase):
@@ -48,7 +81,7 @@ class ReplicatedLinear(LinearBase):
         param.data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight, self.bias)
+        return self.linear(x)
 
 
 class ColumnParallelLinear(LinearBase):
@@ -70,7 +103,7 @@ class ColumnParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight, self.bias)
+        return self.linear(x)
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):
@@ -150,7 +183,13 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
+        y = self.linear(x, use_bias=self.tp_rank == 0)
         if self.tp_size > 1:
             dist.all_reduce(y)
         return y
+
+
+def quantize_fp8(model: nn.Module):
+    for module in model.modules():
+        if isinstance(module, LinearBase):
+            module.quantize_fp8()

@@ -6,6 +6,7 @@ from transformers import AutoConfig
 @dataclass(slots=True)
 class Config:
     model: str
+    quantization: str | None = None
     max_num_batched_tokens: int = 16384
     max_num_seqs: int = 512
     max_model_len: int = 4096
@@ -19,6 +20,7 @@ class Config:
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
+        assert self.quantization in (None, "fp8"), "quantization must be None or 'fp8'"
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model)
