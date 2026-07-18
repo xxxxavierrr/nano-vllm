@@ -510,6 +510,31 @@ class Qwen3_5ForConditionalGeneration(nn.Module):
         )
         return conv_state, recurrent_state
 
+    def create_delta_state_slab(
+        self,
+        capacity: int,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        conv_state = torch.zeros(
+            self.num_linear_attention_layers,
+            capacity,
+            self.delta_conv_dim,
+            self.delta_conv_kernel_size,
+            device=device,
+            dtype=dtype,
+        )
+        recurrent_state = torch.zeros(
+            self.num_linear_attention_layers,
+            capacity,
+            self.delta_num_value_heads,
+            self.delta_key_head_dim,
+            self.delta_value_head_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        return conv_state, recurrent_state
+
     def delta_state_bytes(self, dtype: torch.dtype) -> int:
         conv_values = (
             self.num_linear_attention_layers

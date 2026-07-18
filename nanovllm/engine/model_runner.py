@@ -50,6 +50,9 @@ class ModelRunner:
             )
         self.has_delta_state = hasattr(self.model, "create_delta_state")
         self.delta_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.delta_state_slab: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.delta_state_slots: dict[int, int] = {}
+        self.free_delta_state_slots: list[int] = []
         self.delta_state_capacity: int | None = None
         load_model(self.model, config.model)
         self.max_active_delta_states = 0
@@ -132,6 +135,9 @@ class ModelRunner:
         if self.piecewise_model is not None:
             del self.piecewise_model
         self.delta_states.clear()
+        self.delta_state_slots.clear()
+        self.free_delta_state_slots.clear()
+        self.delta_state_slab = None
         torch.cuda.synchronize()
         dist.destroy_process_group()
 
@@ -170,29 +176,51 @@ class ModelRunner:
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         if not self.has_delta_state:
             return None
-        state = self.delta_states.get(seq_id)
-        if state is not None:
+
+        if self.delta_state_slab is None:
+            state = self.delta_states.get(seq_id)
+            if state is None:
+                state = self.model.create_delta_state(
+                    device="cuda", dtype=self.config.hf_config.dtype
+                )
+                self.delta_states[seq_id] = state
+                self.max_active_delta_states = max(
+                    self.max_active_delta_states, len(self.delta_states)
+                )
             return state
-        if (
-            self.delta_state_capacity is not None
-            and len(self.delta_states) >= self.delta_state_capacity
-        ):
-            raise RuntimeError(
-                "Qwen3.5/3.6 DeltaNet state capacity exhausted: "
-                f"{self.delta_state_capacity} active sequences"
+
+        slot = self.delta_state_slots.get(seq_id)
+        if slot is None:
+            if not self.free_delta_state_slots:
+                raise RuntimeError(
+                    "Qwen3.5/3.6 DeltaNet state capacity exhausted: "
+                    f"{self.delta_state_capacity} active sequences"
+                )
+            slot = self.free_delta_state_slots.pop()
+            conv_slab, recurrent_slab = self.delta_state_slab
+            conv_slab[:, slot].zero_()
+            recurrent_slab[:, slot].zero_()
+            self.delta_state_slots[seq_id] = slot
+            self.max_active_delta_states = max(
+                self.max_active_delta_states, len(self.delta_state_slots)
             )
-        state = self.model.create_delta_state(
-            device="cuda", dtype=self.config.hf_config.dtype
-        )
-        self.delta_states[seq_id] = state
-        self.max_active_delta_states = max(
-            self.max_active_delta_states, len(self.delta_states)
-        )
-        return state
+
+        if self.delta_state_capacity is None or slot >= self.delta_state_capacity:
+            raise RuntimeError(
+                f"invalid DeltaNet state slot {slot} for capacity "
+                f"{self.delta_state_capacity}"
+            )
+        conv_slab, recurrent_slab = self.delta_state_slab
+        return conv_slab[:, slot], recurrent_slab[:, slot]
 
     def release_sequences(self, seq_ids):
         for seq_id in seq_ids:
-            self.delta_states.pop(seq_id, None)
+            if self.delta_state_slab is None:
+                self.delta_states.pop(seq_id, None)
+                continue
+            slot = self.delta_state_slots.pop(seq_id, None)
+            if slot is not None:
+                self.free_delta_state_slots.append(slot)
 
 
     def warmup_model(self):
@@ -245,6 +273,16 @@ class ModelRunner:
             )
             config.max_num_seqs = self.delta_state_capacity
             reserved_delta_bytes = self.delta_state_capacity * state_bytes
+            self.delta_states.clear()
+            self.delta_state_slab = self.model.create_delta_state_slab(
+                self.delta_state_capacity,
+                device="cuda",
+                dtype=hf_config.dtype,
+            )
+            self.delta_state_slots.clear()
+            self.free_delta_state_slots = list(
+                range(self.delta_state_capacity - 1, -1, -1)
+            )
         cache_bytes = available_bytes - reserved_delta_bytes
         config.num_kvcache_blocks = cache_bytes // block_bytes
         assert config.num_kvcache_blocks > 0
