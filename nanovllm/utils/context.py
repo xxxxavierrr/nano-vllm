@@ -19,6 +19,8 @@ class Context:
     num_padded_tokens: int = 0
     sequence_slices: tuple[tuple[int, int], ...] = ()
     delta_states: tuple[tuple[torch.Tensor, torch.Tensor], ...] = ()
+    delta_recurrent_slab: torch.Tensor | None = None
+    delta_state_slots: torch.Tensor | None = None
 
 
 _CONTEXT = Context()
@@ -44,6 +46,8 @@ def set_context(
     num_padded_tokens=0,
     sequence_slices=(),
     delta_states=(),
+    delta_recurrent_slab=None,
+    delta_state_slots=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -61,6 +65,8 @@ def set_context(
         num_padded_tokens=num_padded_tokens,
         sequence_slices=sequence_slices,
         delta_states=delta_states,
+        delta_recurrent_slab=delta_recurrent_slab,
+        delta_state_slots=delta_state_slots,
     )
 
 

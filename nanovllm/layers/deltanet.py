@@ -151,3 +151,171 @@ def gated_delta_recurrent(
         state,
     )
 
+
+
+@triton.jit
+def _gated_delta_recurrent_packed_kernel(
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    beta_ptr,
+    decay_ptr,
+    cu_seqlens_ptr,
+    slots_ptr,
+    state_ptr,
+    output_ptr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_V: tl.constexpr,
+):
+    value_block = tl.program_id(axis=0)
+    sequence_head = tl.program_id(axis=1)
+    sequence = sequence_head // H
+    head = sequence_head % H
+    begin = tl.load(cu_seqlens_ptr + sequence)
+    end = tl.load(cu_seqlens_ptr + sequence + 1)
+    slot = tl.load(slots_ptr + sequence)
+
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_v = value_block * BLOCK_V + tl.arange(0, BLOCK_V)
+    state_offsets = (
+        (slot * H + head) * K * V
+        + offs_k[:, None] * V
+        + offs_v[None, :]
+    )
+    state = tl.load(
+        state_ptr + state_offsets,
+        mask=(offs_k[:, None] < K) & (offs_v[None, :] < V),
+        other=0.0,
+    ).to(tl.float32)
+
+    token = begin
+    while token < end:
+        q = tl.load(
+            q_ptr + (token * H + head) * K + offs_k,
+            mask=offs_k < K,
+            other=0.0,
+        ).to(tl.float32)
+        k = tl.load(
+            k_ptr + (token * H + head) * K + offs_k,
+            mask=offs_k < K,
+            other=0.0,
+        ).to(tl.float32)
+        value = tl.load(
+            v_ptr + (token * H + head) * V + offs_v,
+            mask=offs_v < V,
+            other=0.0,
+        ).to(tl.float32)
+        beta = tl.load(beta_ptr + token * H + head).to(tl.float32)
+        decay = tl.load(decay_ptr + token * H + head).to(tl.float32)
+
+        state *= decay
+        memory = tl.sum(state * k[:, None], axis=0)
+        delta = (value - memory) * beta
+        state += k[:, None] * delta[None, :]
+        output = tl.sum(state * q[:, None], axis=0)
+        tl.store(
+            output_ptr + (token * H + head) * V + offs_v,
+            output,
+            mask=offs_v < V,
+        )
+        token += 1
+
+    tl.store(
+        state_ptr + state_offsets,
+        state,
+        mask=(offs_k[:, None] < K) & (offs_v[None, :] < V),
+    )
+
+
+@triton_op("nanovllm::gated_delta_recurrent_packed", mutates_args={"state_slab"})
+def _gated_delta_recurrent_packed(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    value: torch.Tensor,
+    beta: torch.Tensor,
+    decay: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    slots: torch.Tensor,
+    state_slab: torch.Tensor,
+) -> torch.Tensor:
+    if q.ndim != 3 or k.shape != q.shape or value.ndim != 3:
+        raise ValueError("packed q/k/value must have shapes [T, H, K/V]")
+    tokens, heads, key_dim = q.shape
+    value_dim = value.shape[-1]
+    if value.shape[:2] != (tokens, heads):
+        raise ValueError("packed value T/H dimensions must match q/k")
+    if beta.shape != (tokens, heads) or decay.shape != (tokens, heads):
+        raise ValueError("packed beta and decay must have shape [T, H]")
+    if cu_seqlens.dtype is not torch.int32 or slots.dtype is not torch.int32:
+        raise TypeError("cu_seqlens and Delta state slots must be int32")
+    if cu_seqlens.ndim != 1 or slots.ndim != 1:
+        raise ValueError("cu_seqlens and Delta state slots must be rank-1")
+    if cu_seqlens.numel() != slots.numel() + 1:
+        raise ValueError("cu_seqlens must contain one more entry than slots")
+    if state_slab.ndim != 4 or state_slab.shape[1:] != (
+        heads,
+        key_dim,
+        value_dim,
+    ):
+        raise ValueError("state slab must have shape [capacity, H, K, V]")
+    float_tensors = (q, k, value, beta, decay, state_slab)
+    if not all(tensor.is_cuda for tensor in (*float_tensors, cu_seqlens, slots)):
+        raise ValueError("packed DeltaNet recurrent kernel requires CUDA tensors")
+    if not all(tensor.dtype is torch.float32 for tensor in float_tensors):
+        raise TypeError("packed DeltaNet recurrent kernel requires float32 tensors")
+    if not all(
+        tensor.is_contiguous()
+        for tensor in (*float_tensors, cu_seqlens, slots)
+    ):
+        raise ValueError("packed DeltaNet recurrent tensors must be contiguous")
+
+    output = torch.empty_like(value)
+    block_k = triton.next_power_of_2(key_dim)
+    block_v = min(8, triton.next_power_of_2(value_dim))
+    num_sequences = slots.numel()
+    grid = (triton.cdiv(value_dim, block_v), num_sequences * heads)
+    wrap_triton(_gated_delta_recurrent_packed_kernel)[grid](
+        q,
+        k,
+        value,
+        beta,
+        decay,
+        cu_seqlens,
+        slots,
+        state_slab,
+        output,
+        H=heads,
+        K=key_dim,
+        V=value_dim,
+        BLOCK_K=block_k,
+        BLOCK_V=block_v,
+        num_warps=1,
+        num_stages=3,
+    )
+    return output
+
+
+def gated_delta_recurrent_packed(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    value: torch.Tensor,
+    beta: torch.Tensor,
+    decay: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    slots: torch.Tensor,
+    state_slab: torch.Tensor,
+) -> torch.Tensor:
+    return _gated_delta_recurrent_packed(
+        q.contiguous(),
+        k.contiguous(),
+        value.contiguous(),
+        beta.contiguous(),
+        decay.contiguous(),
+        cu_seqlens.contiguous(),
+        slots.contiguous(),
+        state_slab,
+    )
+

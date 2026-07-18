@@ -383,10 +383,19 @@ class ModelRunner:
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         delta_states = ()
+        delta_recurrent_slab = None
+        delta_state_slots = None
         if self.has_delta_state:
             delta_states = tuple(
                 self.get_delta_state(seq.seq_id) for seq in seqs
             )
+            if self.delta_state_slab is not None:
+                delta_recurrent_slab = self.delta_state_slab[1]
+                delta_state_slots = torch.tensor(
+                    [self.delta_state_slots[seq.seq_id] for seq in seqs],
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -404,6 +413,8 @@ class ModelRunner:
             use_kv_cache=use_kv_cache,
             sequence_slices=tuple(sequence_slices),
             delta_states=delta_states,
+            delta_recurrent_slab=delta_recurrent_slab,
+            delta_state_slots=delta_state_slots,
             is_uniform_decode=is_uniform_decode,
             num_actual_tokens=num_actual_tokens,
             num_padded_tokens=model_num_tokens,

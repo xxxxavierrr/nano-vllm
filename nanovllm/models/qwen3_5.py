@@ -7,7 +7,10 @@ import torch.distributed as dist
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
-from nanovllm.layers.deltanet import gated_delta_recurrent
+from nanovllm.layers.deltanet import (
+    gated_delta_recurrent,
+    gated_delta_recurrent_packed,
+)
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.layers.gptq import GPTQConfig
 from nanovllm.layers.linear import (
@@ -209,6 +212,69 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         core = self.norm(core, z)
         return self.out_proj(core.reshape(seq_len, self.value_dim))
 
+    def _forward_packed(
+        self,
+        hidden_states: torch.Tensor,
+        states: tuple[tuple[torch.Tensor, torch.Tensor], ...],
+        slices: tuple[tuple[int, int], ...],
+        cu_seqlens: torch.Tensor,
+        state_slots: torch.Tensor,
+        recurrent_state_slab: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens = hidden_states.size(0)
+        projected_qkv = self.in_proj_qkv(hidden_states)
+        z = self.in_proj_z(hidden_states).view(
+            num_tokens, self.num_v_heads, self.head_v_dim
+        )
+        beta = self.in_proj_b(hidden_states).sigmoid()
+        a = self.in_proj_a(hidden_states)
+
+        conv_outputs = []
+        for (start, end), state in zip(slices, states):
+            conv_state = state[0][self.state_idx]
+            mixed_qkv = projected_qkv[start:end].transpose(0, 1)
+            conv_input = torch.cat((conv_state, mixed_qkv), dim=-1)
+            conv_state.copy_(conv_input[:, -self.conv_kernel_size :])
+            convolved = F.conv1d(
+                conv_input.unsqueeze(0),
+                self.conv1d.weight,
+                bias=None,
+                groups=self.conv_dim,
+            )[0, :, -(end - start) :]
+            conv_outputs.append(F.silu(convolved.transpose(0, 1)))
+        mixed_qkv = torch.cat(conv_outputs, dim=0)
+
+        query, key, value = mixed_qkv.split(
+            [self.key_dim, self.key_dim, self.value_dim], dim=-1
+        )
+        query = query.view(num_tokens, self.num_k_heads, self.head_k_dim)
+        key = key.view(num_tokens, self.num_k_heads, self.head_k_dim)
+        value = value.view(num_tokens, self.num_v_heads, self.head_v_dim)
+        if self.num_v_heads != self.num_k_heads:
+            repeats = self.num_v_heads // self.num_k_heads
+            query = query.repeat_interleave(repeats, dim=1)
+            key = key.repeat_interleave(repeats, dim=1)
+        query = _l2norm(query) / math.sqrt(self.head_k_dim)
+        key = _l2norm(key)
+        value = value.float()
+        decay = (
+            -self.A_log.float().exp()
+            * F.softplus(a.float() + self.dt_bias.float())
+        ).exp()
+
+        core = gated_delta_recurrent_packed(
+            query,
+            key,
+            value,
+            beta.float(),
+            decay,
+            cu_seqlens,
+            state_slots,
+            recurrent_state_slab,
+        ).to(hidden_states.dtype)
+        core = self.norm(core, z)
+        return self.out_proj(core.reshape(num_tokens, self.value_dim))
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
         num_actual_tokens = context.num_actual_tokens or hidden_states.size(0)
@@ -223,11 +289,23 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         if len(states) != len(slices):
             raise ValueError("DeltaNet state count does not match packed sequences")
 
-        outputs = [
-            self._forward_sequence(real_hidden_states[start:end], state)
-            for (start, end), state in zip(slices, states)
-        ]
-        output = torch.cat(outputs, dim=0)
+        if context.delta_recurrent_slab is not None:
+            if context.delta_state_slots is None or context.cu_seqlens_q is None:
+                raise ValueError("packed DeltaNet metadata is incomplete")
+            output = self._forward_packed(
+                real_hidden_states,
+                states,
+                slices,
+                context.cu_seqlens_q,
+                context.delta_state_slots,
+                context.delta_recurrent_slab[self.state_idx],
+            )
+        else:
+            outputs = [
+                self._forward_sequence(real_hidden_states[start:end], state)
+                for (start, end), state in zip(slices, states)
+            ]
+            output = torch.cat(outputs, dim=0)
         if hidden_states.size(0) != num_actual_tokens:
             output = F.pad(
                 output, (0, 0, 0, hidden_states.size(0) - num_actual_tokens)
