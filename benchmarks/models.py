@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True)
 class ChatRequest:
-    request_id: st
+    request_id: str
     messages: list[dict[str, str]]
     max_tokens: int
     temperature: float
@@ -13,7 +13,7 @@ class ChatRequest:
 
 @dataclass(slots=True)
 class RequestResult:
-    request_id: st
+    request_id: str
     scheduled_s: float
     started_s: float
     finished_s: float

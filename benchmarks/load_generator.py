@@ -1,7 +1,7 @@
 import asyncio
 import math
 import random
-from time import perf_counte
+from time import perf_counter
 
 from benchmarks.backends.openai_chat import OpenAIChatBackend
 from benchmarks.models import ChatRequest, RequestResult
