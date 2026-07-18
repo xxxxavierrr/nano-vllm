@@ -108,6 +108,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-output-len", type=int, default=8)
+    parser.add_argument("--warmup-num-requests", type=int, default=1)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--master-port", type=int, default=2333)
     parser.add_argument("--max-num-seqs", type=int, default=512)
@@ -145,6 +146,8 @@ def parse_args(argv: list[str] | None = None):
         parser.error("--master-port must be between 1 and 65535")
     if args.piecewise_max_tokens <= 0:
         parser.error("--piecewise-max-tokens must be positive")
+    if args.warmup_num_requests <= 0:
+        parser.error("--warmup-num-requests must be positive")
     return args
 
 
@@ -170,13 +173,19 @@ def main(argv: list[str] | None = None):
     init_seconds = perf_counter() - init_started
 
     warmup_started = perf_counter()
+    warmup_prompt = [1] * min(args.input_len, 32)
     llm.generate(
-        [[1] * min(args.input_len, 32)],
-        SamplingParams(temperature=args.temperature, max_tokens=args.warmup_output_len, ignore_eos=True),
+        [warmup_prompt] * args.warmup_num_requests,
+        SamplingParams(
+            temperature=args.temperature,
+            max_tokens=args.warmup_output_len,
+            ignore_eos=True,
+        ),
         use_tqdm=False,
     )
     warmup_seconds = perf_counter() - warmup_started
     llm.scheduler.num_preemptions = 0
+    llm.model_runner.max_active_delta_states = 0
 
     workload = deque(make_workload(args, llm.model_runner.config.hf_config.vocab_size))
     total_input_tokens = sum(len(prompt) for prompt, _ in workload)
@@ -241,8 +250,7 @@ def main(argv: list[str] | None = None):
         seqs = batch.sequences
         scheduled_tokens = batch.total_tokens
         previous_completion_tokens = {seq.seq_id: seq.num_completion_tokens for seq in seqs}
-        token_ids = llm.model_runner.call("run", seqs)
-        llm.scheduler.postprocess(batch, token_ids)
+        llm.execute_batch(batch)
         step_finished = perf_counter()
         step_seconds = step_finished - step_started
         execution_mode = llm.model_runner.last_execution_mode
@@ -335,13 +343,15 @@ def main(argv: list[str] | None = None):
         "engine": {
             "model": str(Path(args.model).resolve()),
             "model_dtype": str(config.hf_config.dtype).removeprefix("torch."),
-            "quantization": args.quantization or "none",
+            "model_family": config.model_family,
+            "quantization": config.quantization or "none",
             "tensor_parallel_size": args.tensor_parallel_size,
             "master_port": args.master_port,
             "enforce_eager": args.enforce_eager,
             "cudagraph_mode": config.cudagraph_mode.value,
             "piecewise_max_tokens": config.piecewise_max_tokens,
-            "max_num_seqs": args.max_num_seqs,
+            "requested_max_num_seqs": args.max_num_seqs,
+            "max_num_seqs": config.max_num_seqs,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_model_len": args.max_model_len,
             "gpu_memory_utilization": args.gpu_memory_utilization,
@@ -404,6 +414,7 @@ def main(argv: list[str] | None = None):
         },
         "scheduler": {
             "preemptions": llm.scheduler.num_preemptions,
+            "prefix_cache_enabled": config.enable_prefix_cache,
             "max_batch_size": max_batch_size,
             "max_batched_tokens": max_batched_tokens,
             "cached_prompt_tokens": cached_prompt_tokens,
@@ -413,12 +424,19 @@ def main(argv: list[str] | None = None):
             "model_storage_mib": (parameter_bytes + buffer_bytes) / 2**20,
             "kv_cache_blocks": config.num_kvcache_blocks,
             "kv_cache_token_capacity": config.num_kvcache_blocks * config.kvcache_block_size,
+            "delta_state_per_request_mib": (
+                model.delta_state_bytes(config.hf_config.dtype) / 2**20
+                if hasattr(model, "delta_state_bytes") else 0.0
+            ),
+            "delta_state_capacity": llm.model_runner.delta_state_capacity,
+            "max_active_delta_states": llm.model_runner.max_active_delta_states,
             "peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
             "peak_reserved_mib": torch.cuda.max_memory_reserved() / 2**20,
         },
         "startup": {
             "engine_init_s": init_seconds,
             "explicit_warmup_s": warmup_seconds,
+            "warmup_num_requests": args.warmup_num_requests,
         },
         "slo": {
             "enabled": slo_enabled,

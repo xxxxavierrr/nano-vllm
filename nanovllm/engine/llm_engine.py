@@ -1,9 +1,10 @@
 import atexit
 from dataclasses import dataclass, fields
 from time import perf_counter
+
+import torch.multiprocessing as mp
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
-import torch.multiprocessing as mp
 
 from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
@@ -35,7 +36,7 @@ class EngineStepStats:
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
-        config_fields = {field.name for field in fields(Config)}
+        config_fields = {field.name for field in fields(Config) if field.init}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
         self._closed = False
@@ -74,15 +75,31 @@ class LLMEngine:
         return seq.seq_id
 
     def abort_request(self, seq_id: int) -> bool:
-        return self.scheduler.abort(seq_id)
+        aborted = self.scheduler.abort(seq_id)
+        if aborted:
+            self.model_runner.call("release_sequences", (seq_id,))
+        return aborted
+
+    def execute_batch(self, batch):
+        if batch.reset_sequence_ids:
+            self.model_runner.call(
+                "release_sequences", batch.reset_sequence_ids
+            )
+        token_ids = self.model_runner.call("run", batch.sequences)
+        self.scheduler.postprocess(batch, token_ids)
+        finished_ids = tuple(
+            seq.seq_id for seq in batch.sequences if seq.is_finished
+        )
+        if finished_ids:
+            self.model_runner.call("release_sequences", finished_ids)
+        return token_ids
 
     def step(self):
         batch = self.scheduler.schedule()
         previous_completion_tokens = {
             seq.seq_id: seq.num_completion_tokens for seq in batch.sequences
         }
-        token_ids = self.model_runner.call("run", batch.sequences)
-        self.scheduler.postprocess(batch, token_ids)
+        self.execute_batch(batch)
         outputs = [
             EngineOutput(
                 seq.seq_id,
@@ -109,13 +126,18 @@ class LLMEngine:
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[str]:
-        pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True, disable=not use_tqdm)
+        pbar = tqdm(
+            total=len(prompts),
+            desc="Generating",
+            dynamic_ncols=True,
+            disable=not use_tqdm,
+        )
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}
-        prefill_throughput = decode_throughput = 0.
+        prefill_throughput = decode_throughput = 0.0
         while not self.is_finished():
             t = perf_counter()
             output, stats = self.step()
@@ -134,5 +156,10 @@ class LLMEngine:
                     pbar.update(1)
         pbar.close()
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
-        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
-        return outputs
+        return [
+            {
+                "text": self.tokenizer.decode(token_ids),
+                "token_ids": token_ids,
+            }
+            for token_ids in outputs
+        ]

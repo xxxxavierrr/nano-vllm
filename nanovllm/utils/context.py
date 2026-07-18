@@ -17,6 +17,8 @@ class Context:
     is_uniform_decode: bool = False
     num_actual_tokens: int = 0
     num_padded_tokens: int = 0
+    sequence_slices: tuple[tuple[int, int], ...] = ()
+    delta_states: tuple[tuple[torch.Tensor, torch.Tensor], ...] = ()
 
 
 _CONTEXT = Context()
@@ -40,6 +42,8 @@ def set_context(
     is_uniform_decode=False,
     num_actual_tokens=0,
     num_padded_tokens=0,
+    sequence_slices=(),
+    delta_states=(),
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -55,6 +59,8 @@ def set_context(
         is_uniform_decode=is_uniform_decode,
         num_actual_tokens=num_actual_tokens,
         num_padded_tokens=num_padded_tokens,
+        sequence_slices=sequence_slices,
+        delta_states=delta_states,
     )
 
 

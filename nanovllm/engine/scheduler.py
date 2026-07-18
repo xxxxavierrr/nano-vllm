@@ -10,6 +10,7 @@ class SchedulerBatch:
     sequences: list[Sequence]
     prefill_tokens: int
     decode_tokens: int
+    reset_sequence_ids: tuple[int, ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -26,10 +27,16 @@ class Scheduler:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
+        self.enable_prefix_cache = getattr(config, "enable_prefix_cache", True)
         self.block_size = config.kvcache_block_size
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        self.block_manager = BlockManager(
+            config.num_kvcache_blocks,
+            config.kvcache_block_size,
+            enable_prefix_cache=self.enable_prefix_cache,
+        )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+        self._reset_sequence_ids: list[int] = []
         self.num_preemptions = 0
 
     def is_finished(self):
@@ -114,7 +121,11 @@ class Scheduler:
             token_budget -= num_tokens
 
         assert scheduled_seqs
-        return SchedulerBatch(scheduled_seqs, prefill_tokens, decode_tokens)
+        reset_sequence_ids = tuple(self._reset_sequence_ids)
+        self._reset_sequence_ids.clear()
+        return SchedulerBatch(
+            scheduled_seqs, prefill_tokens, decode_tokens, reset_sequence_ids
+        )
 
     def _reserve_decode_slot(self, seq: Sequence, protected: set[int]) -> bool:
         while not self.block_manager.can_append(seq):
@@ -139,6 +150,7 @@ class Scheduler:
         seq.status = SequenceStatus.WAITING
         seq.num_scheduled_tokens = 0
         self.block_manager.deallocate(seq)
+        self._reset_sequence_ids.append(seq.seq_id)
         self.waiting.appendleft(seq)
 
     def postprocess(self, batch: SchedulerBatch, token_ids: list[int]):

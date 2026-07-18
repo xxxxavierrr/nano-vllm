@@ -16,6 +16,7 @@ from nanovllm.engine.cudagraph import (
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
+from nanovllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from nanovllm.layers.linear import quantize_fp8
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -39,8 +40,19 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config, config.gptq_config)
+        if config.model_family == "qwen3_5":
+            self.model = Qwen3_5ForConditionalGeneration(
+                hf_config, config.gptq_config
+            )
+        else:
+            self.model = Qwen3ForCausalLM(
+                hf_config, config.gptq_config
+            )
+        self.has_delta_state = hasattr(self.model, "create_delta_state")
+        self.delta_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.delta_state_capacity: int | None = None
         load_model(self.model, config.model)
+        self.max_active_delta_states = 0
         if config.quantization == "fp8":
             quantize_fp8(self.model)
             torch.cuda.empty_cache()
@@ -119,6 +131,7 @@ class ModelRunner:
             del self.graphs, self.graph_pool
         if self.piecewise_model is not None:
             del self.piecewise_model
+        self.delta_states.clear()
         torch.cuda.synchronize()
         dist.destroy_process_group()
 
@@ -152,16 +165,50 @@ class ModelRunner:
         method = getattr(self, method_name, None)
         return method(*args)
 
+    def get_delta_state(
+        self, seq_id: int
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not self.has_delta_state:
+            return None
+        state = self.delta_states.get(seq_id)
+        if state is not None:
+            return state
+        if (
+            self.delta_state_capacity is not None
+            and len(self.delta_states) >= self.delta_state_capacity
+        ):
+            raise RuntimeError(
+                "Qwen3.5/3.6 DeltaNet state capacity exhausted: "
+                f"{self.delta_state_capacity} active sequences"
+            )
+        state = self.model.create_delta_state(
+            device="cuda", dtype=self.config.hf_config.dtype
+        )
+        self.delta_states[seq_id] = state
+        self.max_active_delta_states = max(
+            self.max_active_delta_states, len(self.delta_states)
+        )
+        return state
+
+    def release_sequences(self, seq_ids):
+        for seq_id in seq_ids:
+            self.delta_states.pop(seq_id, None)
+
+
     def warmup_model(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
         seq_len = min(max_num_batched_tokens, max_model_len)
         num_seqs = min(max_num_batched_tokens // seq_len, self.config.max_num_seqs)
+        if self.has_delta_state:
+            seq_len = min(seq_len, 8)
+            num_seqs = 1
         seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
         for seq in seqs:
             seq.num_scheduled_tokens = seq_len
         self.run(seqs)
+        self.release_sequences(tuple(seq.seq_id for seq in seqs))
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
@@ -173,12 +220,37 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+        attention_modules = [
+            module
+            for module in self.model.modules()
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache")
+        ]
+        num_attention_layers = len(attention_modules)
+        block_bytes = (
+            2 * num_attention_layers * self.block_size
+            * num_kv_heads * head_dim * hf_config.dtype.itemsize
+        )
+        available_bytes = int(
+            total * config.gpu_memory_utilization - used - peak + current
+        )
+        reserved_delta_bytes = 0
+        if self.has_delta_state:
+            state_bytes = self.model.delta_state_bytes(hf_config.dtype)
+            total_capacity = (available_bytes - block_bytes) // state_bytes
+            if total_capacity < 1:
+                raise RuntimeError("insufficient GPU memory for one DeltaNet state")
+            half_capacity = max(1, available_bytes // 2 // state_bytes)
+            self.delta_state_capacity = min(
+                config.max_num_seqs, total_capacity, half_capacity
+            )
+            config.max_num_seqs = self.delta_state_capacity
+            reserved_delta_bytes = self.delta_state_capacity * state_bytes
+        cache_bytes = available_bytes - reserved_delta_bytes
+        config.num_kvcache_blocks = cache_bytes // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(
             2,
-            hf_config.num_hidden_layers,
+            num_attention_layers,
             config.num_kvcache_blocks,
             self.block_size,
             num_kv_heads,
@@ -186,12 +258,9 @@ class ModelRunner:
             dtype=hf_config.dtype,
             device="cuda",
         )
-        layer_id = 0
-        for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache.tensor = self.kv_cache[0, layer_id]
-                module.v_cache.tensor = self.kv_cache[1, layer_id]
-                layer_id += 1
+        for layer_id, module in enumerate(attention_modules):
+            module.k_cache.tensor = self.kv_cache[0, layer_id]
+            module.v_cache.tensor = self.kv_cache[1, layer_id]
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
@@ -206,6 +275,7 @@ class ModelRunner:
         cu_seqlens_k = [0]
         max_seqlen_q = 0
         max_seqlen_k = 0
+        sequence_slices = []
         slot_mapping = []
         logits_indices = []
         context_lens = []
@@ -231,6 +301,7 @@ class ModelRunner:
                 input_ids.extend(scheduled_token_ids)
             positions.extend(range(start, end))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
+            sequence_slices.append((cu_seqlens_q[-2], cu_seqlens_q[-1]))
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
@@ -273,6 +344,11 @@ class ModelRunner:
             raise ValueError("dispatcher and prepared attention metadata disagree on batch shape")
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        delta_states = ()
+        if self.has_delta_state:
+            delta_states = tuple(
+                self.get_delta_state(seq.seq_id) for seq in seqs
+            )
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -288,6 +364,8 @@ class ModelRunner:
             logits_indices=logits_indices,
             context_lens=context_lens,
             use_kv_cache=use_kv_cache,
+            sequence_slices=tuple(sequence_slices),
+            delta_states=delta_states,
             is_uniform_decode=is_uniform_decode,
             num_actual_tokens=num_actual_tokens,
             num_padded_tokens=model_num_tokens,

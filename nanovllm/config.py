@@ -1,4 +1,5 @@
 import os
+import warnings
 from dataclasses import dataclass, field
 
 from transformers import AutoConfig
@@ -25,14 +26,21 @@ class Config:
     piecewise_max_tokens: int = 512
     hf_config: AutoConfig | None = None
     gptq_config: GPTQConfig | None = field(init=False, default=None)
+    model_family: str = field(init=False, default="")
+    enable_prefix_cache: bool = field(init=False, default=True)
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
-        self.hf_config = AutoConfig.from_pretrained(self.model)
-        checkpoint_config = getattr(self.hf_config, "quantization_config", None)
+        outer_config = AutoConfig.from_pretrained(self.model)
+        self.model_family = str(getattr(outer_config, "model_type", ""))
+        text_config = getattr(outer_config, "text_config", None)
+
+        checkpoint_config = getattr(outer_config, "quantization_config", None)
+        if checkpoint_config is None and text_config is not None:
+            checkpoint_config = getattr(text_config, "quantization_config", None)
         if checkpoint_config is None:
             quantization_config = None
             checkpoint_method = None
@@ -67,9 +75,31 @@ class Config:
                 raise ValueError("GPTQ W4A16 v1 only supports tensor_parallel_size=1")
             self.gptq_config = GPTQConfig.from_dict(quantization_config)
 
+        if self.model_family == "qwen3_5":
+            if text_config is None:
+                raise ValueError("Qwen3.5/3.6 config is missing text_config")
+            if self.tensor_parallel_size != 1:
+                raise ValueError("Qwen3.5/3.6 text inference v1 only supports TP=1")
+            self.hf_config = text_config
+            self.enable_prefix_cache = False
+        else:
+            self.hf_config = outer_config
+
         self.cudagraph_mode = CUDAGraphMode.parse(self.cudagraph_mode)
         if self.enforce_eager:
             self.cudagraph_mode = CUDAGraphMode.NONE
+        if (
+            self.model_family == "qwen3_5"
+            and self.cudagraph_mode is not CUDAGraphMode.NONE
+        ):
+            warnings.warn(
+                "Qwen3.5/3.6 DeltaNet state mutation is eager-only in v1; "
+                "forcing cudagraph_mode=NONE",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
         assert self.piecewise_max_tokens > 0
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8

@@ -25,7 +25,9 @@ class RotaryEmbedding(nn.Module):
     ) -> None:
         super().__init__()
         self.head_size = head_size
-        assert rotary_dim == head_size
+        if rotary_dim <= 0 or rotary_dim > head_size or rotary_dim % 2:
+            raise ValueError("rotary_dim must be even and in (0, head_size]")
+        self.rotary_dim = rotary_dim
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
@@ -42,12 +44,22 @@ class RotaryEmbedding(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        query = apply_rotary_emb(query, cos, sin)
-        key = apply_rotary_emb(key, cos, sin)
+        query_rot, query_pass = query.split(
+            [self.rotary_dim, self.head_size - self.rotary_dim], dim=-1
+        )
+        key_rot, key_pass = key.split(
+            [self.rotary_dim, self.head_size - self.rotary_dim], dim=-1
+        )
+        query = torch.cat(
+            (apply_rotary_emb(query_rot, cos, sin), query_pass), dim=-1
+        )
+        key = torch.cat(
+            (apply_rotary_emb(key_rot, cos, sin), key_pass), dim=-1
+        )
         return query, key
 
 
-@lru_cache(1)
+@lru_cache(8)
 def get_rope(
     head_size: int,
     rotary_dim: int,
