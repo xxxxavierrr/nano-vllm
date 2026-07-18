@@ -108,6 +108,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-output-len", type=int, default=8)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--master-port", type=int, default=2333)
     parser.add_argument("--max-num-seqs", type=int, default=512)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument("--max-model-len", type=int, default=4096)
@@ -133,6 +134,8 @@ def parse_args(argv: list[str] | None = None):
         parser.error("--request-rate must be positive")
     if args.max_concurrency < 0:
         parser.error("--max-concurrency cannot be negative")
+    if not 1 <= args.master_port <= 65535:
+        parser.error("--master-port must be between 1 and 65535")
     return args
 
 
@@ -147,6 +150,7 @@ def main(argv: list[str] | None = None):
         quantization=args.quantization,
         enforce_eager=args.enforce_eager,
         tensor_parallel_size=args.tensor_parallel_size,
+        master_port=args.master_port,
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_model_len=args.max_model_len,
@@ -181,6 +185,9 @@ def main(argv: list[str] | None = None):
     decode_tokens = 0
     prefill_steps = 0
     decode_steps = 0
+    mixed_seconds = 0.0
+    mixed_tokens = 0
+    mixed_steps = 0
     max_batch_size = 0
     max_batched_tokens = 0
     arrival_rng = random.Random(args.seed + 1)
@@ -215,24 +222,29 @@ def main(argv: list[str] | None = None):
             break
 
         step_started = perf_counter()
-        seqs, is_prefill = llm.scheduler.schedule()
-        scheduled_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else len(seqs)
+        batch = llm.scheduler.schedule()
+        seqs = batch.sequences
+        scheduled_tokens = batch.total_tokens
         previous_completion_tokens = {seq.seq_id: seq.num_completion_tokens for seq in seqs}
-        token_ids = llm.model_runner.call("run", seqs, is_prefill)
-        llm.scheduler.postprocess(seqs, token_ids, is_prefill)
+        token_ids = llm.model_runner.call("run", seqs)
+        llm.scheduler.postprocess(batch, token_ids)
         step_finished = perf_counter()
         step_seconds = step_finished - step_started
 
         max_batch_size = max(max_batch_size, len(seqs))
         max_batched_tokens = max(max_batched_tokens, scheduled_tokens)
-        if is_prefill:
+        if batch.prefill_tokens:
             prefill_steps += 1
             prefill_seconds += step_seconds
-            prefill_tokens += scheduled_tokens
-        else:
+            prefill_tokens += batch.prefill_tokens
+        if batch.decode_tokens:
             decode_steps += 1
             decode_seconds += step_seconds
-            decode_tokens += scheduled_tokens
+            decode_tokens += batch.decode_tokens
+        if batch.prefill_tokens and batch.decode_tokens:
+            mixed_steps += 1
+            mixed_seconds += step_seconds
+            mixed_tokens += scheduled_tokens
 
         for seq in seqs:
             record = records[seq.seq_id]
@@ -305,6 +317,7 @@ def main(argv: list[str] | None = None):
             "model_dtype": str(config.hf_config.dtype).removeprefix("torch."),
             "quantization": args.quantization or "none",
             "tensor_parallel_size": args.tensor_parallel_size,
+            "master_port": args.master_port,
             "enforce_eager": args.enforce_eager,
             "max_num_seqs": args.max_num_seqs,
             "max_num_batched_tokens": args.max_num_batched_tokens,
@@ -350,6 +363,12 @@ def main(argv: list[str] | None = None):
                 "seconds": decode_seconds,
                 "tokens": decode_tokens,
                 "token_per_s": decode_tokens / decode_seconds if decode_seconds else 0.0,
+            },
+            "mixed": {
+                "steps": mixed_steps,
+                "seconds": mixed_seconds,
+                "tokens": mixed_tokens,
+                "token_per_s": mixed_tokens / mixed_seconds if mixed_seconds else 0.0,
             },
         },
         "scheduler": {
@@ -415,6 +434,10 @@ def main(argv: list[str] | None = None):
     print(
         f"Decode:  {decode_tokens} tok / {decode_seconds:.3f}s = "
         f"{result['phases']['decode']['token_per_s']:.2f} tok/s"
+    )
+    print(
+        f"Mixed:   {mixed_tokens} tok / {mixed_seconds:.3f}s = "
+        f"{result['phases']['mixed']['token_per_s']:.2f} tok/s"
     )
     print(
         f"Max batch: {max_batch_size}  Max batched tokens: {max_batched_tokens}  "

@@ -21,6 +21,16 @@ class EngineOutput:
     cached_tokens: int
 
 
+@dataclass(slots=True)
+class EngineStepStats:
+    prefill_tokens: int
+    decode_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prefill_tokens + self.decode_tokens
+
+
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
@@ -66,11 +76,12 @@ class LLMEngine:
         return self.scheduler.abort(seq_id)
 
     def step(self):
-        seqs, is_prefill = self.scheduler.schedule()
-        num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
-        previous_completion_tokens = {seq.seq_id: seq.num_completion_tokens for seq in seqs}
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
-        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        batch = self.scheduler.schedule()
+        previous_completion_tokens = {
+            seq.seq_id: seq.num_completion_tokens for seq in batch.sequences
+        }
+        token_ids = self.model_runner.call("run", batch.sequences)
+        self.scheduler.postprocess(batch, token_ids)
         outputs = [
             EngineOutput(
                 seq.seq_id,
@@ -79,10 +90,10 @@ class LLMEngine:
                 seq.finish_reason,
                 seq.num_prefix_cached_tokens,
             )
-            for seq in seqs
+            for seq in batch.sequences
             if seq.num_completion_tokens > previous_completion_tokens[seq.seq_id]
         ]
-        return outputs, num_tokens
+        return outputs, EngineStepStats(batch.prefill_tokens, batch.decode_tokens)
 
     def is_finished(self):
         return self.scheduler.is_finished()
@@ -102,11 +113,12 @@ class LLMEngine:
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
-            output, num_tokens = self.step()
-            if num_tokens > 0:
-                prefill_throughput = num_tokens / (perf_counter() - t)
-            else:
-                decode_throughput = -num_tokens / (perf_counter() - t)
+            output, stats = self.step()
+            elapsed = perf_counter() - t
+            if stats.prefill_tokens:
+                prefill_throughput = stats.prefill_tokens / elapsed
+            if stats.decode_tokens:
+                decode_throughput = stats.decode_tokens / elapsed
             pbar.set_postfix({
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",

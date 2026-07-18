@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence, SequenceStatus
@@ -39,9 +41,11 @@ def test_abort_running_request_releases_blocks():
     scheduler = make_scheduler()
     seq = make_sequence()
     scheduler.add(seq)
-    scheduled, is_prefill = scheduler.schedule()
+    batch = scheduler.schedule()
 
-    assert is_prefill and scheduled == [seq]
+    assert batch.sequences == [seq]
+    assert batch.prefill_tokens == len(seq)
+    assert batch.decode_tokens == 0
     assert seq.status == SequenceStatus.RUNNING
     assert seq.block_table
     assert scheduler.abort(seq.seq_id)
@@ -54,10 +58,11 @@ def test_abort_partial_prefill_releases_blocks():
     scheduler = make_scheduler(max_num_batched_tokens=1)
     seq = make_sequence(length=4)
     scheduler.add(seq)
-    scheduled, is_prefill = scheduler.schedule()
+    batch = scheduler.schedule()
 
-    assert is_prefill and scheduled == [seq]
-    assert seq in scheduler.waiting
+    assert batch.sequences == [seq]
+    assert batch.prefill_tokens == 1
+    assert seq in scheduler.running
     assert seq.block_table
     assert scheduler.abort(seq.seq_id)
     assert scheduler.is_finished()
@@ -70,7 +75,6 @@ def test_abort_preempted_request_is_safe():
     seq = make_sequence()
     scheduler.add(seq)
     scheduler.schedule()
-    scheduler.running.remove(seq)
     scheduler.preempt(seq)
 
     assert not seq.block_table
@@ -94,3 +98,82 @@ def test_prefix_cached_token_count_survives_block_release():
 
     assert cached_blocks == 1
     assert second.num_prefix_cached_tokens == 4
+
+
+def test_decode_and_chunked_prefill_share_one_batch():
+    scheduler = make_scheduler(max_num_batched_tokens=4)
+    decode = make_sequence(length=1)
+    scheduler.add(decode)
+    first_batch = scheduler.schedule()
+    scheduler.postprocess(first_batch, [7])
+
+    prefill = make_sequence(length=6)
+    scheduler.add(prefill)
+    mixed_batch = scheduler.schedule()
+
+    assert mixed_batch.sequences == [decode, prefill]
+    assert mixed_batch.decode_tokens == 1
+    assert mixed_batch.prefill_tokens == 3
+    assert decode.num_scheduled_tokens == 1
+    assert prefill.num_scheduled_tokens == 3
+    assert mixed_batch.sampled_sequences == [decode]
+
+    scheduler.postprocess(mixed_batch, [8])
+    assert decode.num_completion_tokens == 2
+    assert prefill.num_cached_tokens == 3
+
+
+def test_partial_prefill_only_samples_when_it_reaches_frontier():
+    scheduler = make_scheduler(max_num_batched_tokens=2)
+    seq = make_sequence(length=5)
+    scheduler.add(seq)
+
+    first_batch = scheduler.schedule()
+    assert first_batch.sampled_sequences == []
+    scheduler.postprocess(first_batch, [])
+    assert seq.num_cached_tokens == 2
+    assert seq.num_completion_tokens == 0
+
+    second_batch = scheduler.schedule()
+    assert second_batch.sampled_sequences == []
+    scheduler.postprocess(second_batch, [])
+    assert seq.num_cached_tokens == 4
+
+    final_batch = scheduler.schedule()
+    assert final_batch.sampled_sequences == [seq]
+    scheduler.postprocess(final_batch, [9])
+    assert seq.num_cached_tokens == 5
+    assert seq.completion_token_ids == [9]
+
+
+def test_postprocess_validates_sample_count_before_mutating_state():
+    scheduler = make_scheduler()
+    seq = make_sequence()
+    scheduler.add(seq)
+    batch = scheduler.schedule()
+
+    with pytest.raises(ValueError, match="1 sampled sequences"):
+        scheduler.postprocess(batch, [])
+
+    assert seq.num_cached_tokens == 0
+    assert seq.num_scheduled_tokens == len(seq)
+    assert seq.num_completion_tokens == 0
+
+
+def test_postprocess_distinguishes_stop_and_length():
+    eos_scheduler = make_scheduler()
+    eos_seq = make_sequence()
+    eos_scheduler.add(eos_seq)
+    eos_scheduler.postprocess(eos_scheduler.schedule(), [eos_scheduler.eos])
+    assert eos_seq.is_finished
+    assert eos_seq.finish_reason == "stop"
+    assert not eos_seq.block_table
+
+    length_scheduler = make_scheduler()
+    length_seq = make_sequence()
+    length_seq.max_tokens = 1
+    length_scheduler.add(length_seq)
+    length_scheduler.postprocess(length_scheduler.schedule(), [7])
+    assert length_seq.is_finished
+    assert length_seq.finish_reason == "length"
+    assert not length_seq.block_table

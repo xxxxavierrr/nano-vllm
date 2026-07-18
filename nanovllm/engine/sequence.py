@@ -25,7 +25,6 @@ class Sequence:
         self.num_cached_tokens = 0
         self.num_prefix_cached_tokens = 0
         self.num_scheduled_tokens = 0
-        self.is_prefill = True
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
@@ -41,6 +40,22 @@ class Sequence:
     @property
     def is_finished(self):
         return self.status == SequenceStatus.FINISHED
+
+    @property
+    def is_prefill(self):
+        """Whether outstanding work is prompt or recompute processing."""
+        return (
+            self.num_cached_tokens < self.num_prompt_tokens
+            or self.num_tokens - self.num_cached_tokens > 1
+        )
+
+    @property
+    def will_sample(self):
+        """Whether this step catches compute up to the token frontier."""
+        return (
+            self.num_scheduled_tokens > 0
+            and self.num_cached_tokens + self.num_scheduled_tokens == self.num_tokens
+        )
 
     @property
     def num_completion_tokens(self):
