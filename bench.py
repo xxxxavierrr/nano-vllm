@@ -98,6 +98,11 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--label", default="nano-vllm")
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
     parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
+    parser.add_argument(
+        "--speculative-method", choices=["none", "mtp"], default="none"
+    )
+    parser.add_argument("--num-speculative-tokens", type=int, default=1)
+    parser.add_argument("--mtp-model")
     parser.add_argument("--num-requests", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=256)
     parser.add_argument("--output-len", type=int, default=128)
@@ -149,6 +154,13 @@ def parse_args(argv: list[str] | None = None):
         parser.error("--piecewise-max-tokens must be positive")
     if args.warmup_num_requests <= 0:
         parser.error("--warmup-num-requests must be positive")
+    if args.speculative_method == "mtp":
+        if args.num_speculative_tokens != 1:
+            parser.error("current MTP milestone requires --num-speculative-tokens 1")
+        if args.temperature != 0:
+            parser.error("current MTP milestone requires --temperature 0")
+        if args.mtp_model is not None and not Path(args.mtp_model).is_dir():
+            parser.error(f"MTP model directory does not exist: {args.mtp_model}")
     return args
 
 
@@ -162,6 +174,9 @@ def main(argv: list[str] | None = None):
         args.model,
         quantization=args.quantization,
         kv_cache_dtype=args.kv_cache_dtype,
+        speculative_method=args.speculative_method,
+        num_speculative_tokens=args.num_speculative_tokens,
+        mtp_model=args.mtp_model,
         enforce_eager=args.enforce_eager,
         tensor_parallel_size=args.tensor_parallel_size,
         master_port=args.master_port,
@@ -210,6 +225,13 @@ def main(argv: list[str] | None = None):
     mixed_seconds = 0.0
     mixed_tokens = 0
     mixed_steps = 0
+    speculative_stats = {
+        "drafted_tokens": 0,
+        "proposed_tokens": 0,
+        "accepted_tokens": 0,
+        "rejected_tokens": 0,
+        "bonus_tokens": 0,
+    }
     execution_mode_stats = {
         mode.value: {"steps": 0, "seconds": 0.0, "tokens": 0}
         for mode in ExecutionMode
@@ -256,6 +278,10 @@ def main(argv: list[str] | None = None):
         step_finished = perf_counter()
         step_seconds = step_finished - step_started
         execution_mode = llm.model_runner.last_execution_mode
+        step_speculative = llm.model_runner.last_speculative_stats
+        for key in speculative_stats:
+            runner_key = key.removesuffix("_tokens")
+            speculative_stats[key] += step_speculative[runner_key]
         mode_stats = execution_mode_stats[execution_mode]
         mode_stats["steps"] += 1
         mode_stats["seconds"] += step_seconds
@@ -348,6 +374,9 @@ def main(argv: list[str] | None = None):
             "model_family": config.model_family,
             "quantization": config.quantization or "none",
             "kv_cache_dtype": config.kv_cache_dtype,
+            "speculative_method": config.speculative_method,
+            "num_speculative_tokens": config.num_speculative_tokens,
+            "mtp_model": config.mtp_model,
             "kv_cache_storage_dtype": config.kvcache_storage_dtype,
             "kv_cache_scale_mode": (
                 "per_token_per_kv_head"
@@ -421,6 +450,19 @@ def main(argv: list[str] | None = None):
             }
             for mode, stats in execution_mode_stats.items()
         },
+        "speculative": {
+            **speculative_stats,
+            "acceptance_rate": (
+                speculative_stats["accepted_tokens"]
+                / speculative_stats["proposed_tokens"]
+                if speculative_stats["proposed_tokens"]
+                else 0.0
+            ),
+            "average_accepted_length": (
+                speculative_stats["accepted_tokens"]
+                / max(1, speculative_stats["proposed_tokens"])
+            ),
+        },
         "scheduler": {
             "preemptions": llm.scheduler.num_preemptions,
             "prefix_cache_enabled": config.enable_prefix_cache,
@@ -435,6 +477,7 @@ def main(argv: list[str] | None = None):
             "kv_cache_payload_bytes_per_block": config.kvcache_payload_bytes,
             "kv_cache_storage_dtype": config.kvcache_storage_dtype,
             "kv_cache_scale_bytes_per_block": config.kvcache_scale_bytes,
+            "mtp_kv_cache_bytes_per_block": config.mtp_kvcache_bytes,
             "kv_cache_bytes_per_block": config.kvcache_block_bytes,
             "kv_cache_blocks": config.num_kvcache_blocks,
             "kv_cache_token_capacity": config.num_kvcache_blocks * config.kvcache_block_size,

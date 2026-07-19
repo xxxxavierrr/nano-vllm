@@ -465,9 +465,10 @@ class Qwen3_5DecoderLayer(nn.Module):
         layer_idx: int,
         state_idx: int | None,
         quant_config: GPTQConfig | None = None,
+        block_type: str | None = None,
     ):
         super().__init__()
-        self.block_type = config.layer_types[layer_idx]
+        self.block_type = block_type or config.layer_types[layer_idx]
         if self.block_type == "linear_attention":
             if state_idx is None:
                 raise ValueError("linear attention layer requires a state index")

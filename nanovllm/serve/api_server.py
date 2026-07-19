@@ -389,6 +389,11 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-pending-requests", type=int, default=1024)
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
     parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
+    parser.add_argument(
+        "--speculative-method", choices=["none", "mtp"], default="none"
+    )
+    parser.add_argument("--num-speculative-tokens", type=int, default=1)
+    parser.add_argument("--mtp-model")
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--device-ids", type=_parse_device_ids)
     parser.add_argument("--master-port", type=int, default=2333)
@@ -417,6 +422,11 @@ def parse_args(argv: list[str] | None = None):
         parser.error("--device-ids count must match --tensor-parallel-size")
     if args.max_pending_requests <= 0:
         parser.error("--max-pending-requests must be positive")
+    if args.speculative_method == "mtp":
+        if args.num_speculative_tokens != 1:
+            parser.error("current MTP milestone requires --num-speculative-tokens 1")
+        if args.mtp_model is not None and not Path(args.mtp_model).is_dir():
+            parser.error(f"MTP model directory does not exist: {args.mtp_model}")
     if args.piecewise_max_tokens <= 0:
         parser.error("--piecewise-max-tokens must be positive")
     return args

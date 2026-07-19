@@ -13,6 +13,9 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.5}"
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-FULL_AND_PIECEWISE}"
 PIECEWISE_MAX_TOKENS="${PIECEWISE_MAX_TOKENS:-512}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
+SPECULATIVE_METHOD="${SPECULATIVE_METHOD:-none}"
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-1}"
+MTP_MODEL="${MTP_MODEL:-}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
     echo "Python not found: $PYTHON_BIN" >&2
@@ -41,6 +44,9 @@ exec "$PYTHON_BIN" -m nanovllm.serve.api_server \
     --master-port "$MASTER_PORT" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --kv-cache-dtype "$KV_CACHE_DTYPE" \
+    --speculative-method "$SPECULATIVE_METHOD" \
+    --num-speculative-tokens "$NUM_SPECULATIVE_TOKENS" \
+    ${MTP_MODEL:+--mtp-model "$MTP_MODEL"} \
     --cudagraph-mode "$CUDAGRAPH_MODE" \
     --piecewise-max-tokens "$PIECEWISE_MAX_TOKENS" \
     "$@"

@@ -10,7 +10,7 @@ from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
-from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.model_runner import ModelRunner, SpeculativeBatchOutput
 
 
 @dataclass(slots=True)
@@ -27,6 +27,11 @@ class EngineStepStats:
     prefill_tokens: int
     decode_tokens: int
     execution_mode: str
+    speculative_drafted_tokens: int = 0
+    speculative_proposed_tokens: int = 0
+    speculative_accepted_tokens: int = 0
+    speculative_rejected_tokens: int = 0
+    speculative_bonus_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -39,6 +44,7 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config) if field.init}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
+        self.config = config
         self._closed = False
         Sequence.block_size = config.kvcache_block_size
         self.ps = []
@@ -66,6 +72,14 @@ class LLMEngine:
             p.join()
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+        if (
+            self.config.speculative_method == "mtp"
+            and sampling_params.temperature != 0
+        ):
+            raise ValueError(
+                "MTP k=1 correctness milestone currently supports "
+                "temperature=0 only"
+            )
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         if not prompt:
@@ -85,8 +99,18 @@ class LLMEngine:
             self.model_runner.call(
                 "release_sequences", batch.reset_sequence_ids
             )
-        token_ids = self.model_runner.call("run", batch.sequences)
-        self.scheduler.postprocess(batch, token_ids)
+        result = self.model_runner.call("run", batch.sequences)
+        if isinstance(result, SpeculativeBatchOutput):
+            self.scheduler.postprocess(
+                batch,
+                result.token_ids,
+                accepted_counts=result.accepted_counts,
+                next_draft_token_ids=result.next_draft_token_ids,
+            )
+            token_ids = result.token_ids
+        else:
+            self.scheduler.postprocess(batch, result)
+            token_ids = result
         finished_ids = tuple(
             seq.seq_id for seq in batch.sequences if seq.is_finished
         )
@@ -96,25 +120,34 @@ class LLMEngine:
 
     def step(self):
         batch = self.scheduler.schedule()
-        previous_completion_tokens = {
-            seq.seq_id: seq.num_completion_tokens for seq in batch.sequences
+        previous_lengths = {
+            seq.seq_id: seq.num_tokens for seq in batch.sequences
         }
         self.execute_batch(batch)
-        outputs = [
-            EngineOutput(
-                seq.seq_id,
-                seq.last_token,
-                seq.is_finished,
-                seq.finish_reason,
-                seq.num_prefix_cached_tokens,
-            )
-            for seq in batch.sequences
-            if seq.num_completion_tokens > previous_completion_tokens[seq.seq_id]
-        ]
+        outputs = []
+        for seq in batch.sequences:
+            new_tokens = seq.token_ids[previous_lengths[seq.seq_id] :]
+            for token_index, token_id in enumerate(new_tokens):
+                is_last = token_index == len(new_tokens) - 1
+                outputs.append(
+                    EngineOutput(
+                        seq.seq_id,
+                        token_id,
+                        seq.is_finished and is_last,
+                        seq.finish_reason if is_last else None,
+                        seq.num_prefix_cached_tokens,
+                    )
+                )
+        speculative = self.model_runner.last_speculative_stats
         return outputs, EngineStepStats(
             batch.prefill_tokens,
             batch.decode_tokens,
             self.model_runner.last_execution_mode,
+            speculative_drafted_tokens=speculative["drafted"],
+            speculative_proposed_tokens=speculative["proposed"],
+            speculative_accepted_tokens=speculative["accepted"],
+            speculative_rejected_tokens=speculative["rejected"],
+            speculative_bonus_tokens=speculative["bonus"],
         )
 
     def is_finished(self):

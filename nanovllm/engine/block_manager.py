@@ -104,12 +104,28 @@ class BlockManager:
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
+    def num_append_blocks(self, seq: Sequence, num_input_tokens: int) -> int:
+        if num_input_tokens < 1:
+            raise ValueError("num_input_tokens must be positive")
+        required_blocks = (
+            seq.num_cached_tokens + num_input_tokens + self.block_size - 1
+        ) // self.block_size
+        return max(0, required_blocks - len(seq.block_table))
+
+    def can_append_tokens(self, seq: Sequence, num_input_tokens: int) -> bool:
+        return len(self.free_block_ids) >= self.num_append_blocks(
+            seq, num_input_tokens
+        )
+
+    def may_append_tokens(self, seq: Sequence, num_input_tokens: int):
+        for _ in range(self.num_append_blocks(seq, num_input_tokens)):
+            seq.block_table.append(self._allocate_block())
+
     def can_append(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
+        return self.can_append_tokens(seq, 1)
 
     def may_append(self, seq: Sequence):
-        if len(seq) % self.block_size == 1:
-            seq.block_table.append(self._allocate_block())
+        self.may_append_tokens(seq, 1)
 
     def hash_blocks(self, seq: Sequence):
         if not self.enable_prefix_cache:

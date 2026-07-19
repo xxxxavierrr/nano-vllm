@@ -54,38 +54,36 @@ class Scheduler:
                 if seq.block_table:
                     self.block_manager.deallocate(seq)
                 seq.num_scheduled_tokens = 0
+                seq.draft_token_ids.clear()
                 return True
         return False
 
     def schedule(self) -> SchedulerBatch:
-        """Fill one token budget with running work, then waiting prefills.
-
-        There is intentionally no global prefill/decode phase. Each sequence
-        advances from ``num_cached_tokens`` toward its current token frontier.
-        Existing decode work is ordered before partial prefills; remaining
-        budget admits and chunks new prompts.
-        """
+        """Fill one token budget with running work, then waiting prefills."""
         scheduled_seqs: list[Sequence] = []
         protected: set[int] = set()
         token_budget = self.max_num_batched_tokens
         prefill_tokens = 0
         decode_tokens = 0
 
-        # Stable sorting preserves request order within decode and prefill.
         running_snapshot = sorted(self.running, key=lambda seq: seq.is_prefill)
         for seq in running_snapshot:
             if token_budget == 0 or len(scheduled_seqs) >= self.max_num_seqs:
                 break
             if seq not in self.running:
                 continue
-            outstanding = seq.num_tokens - seq.num_cached_tokens
+            outstanding = seq.num_target_inputs
             assert outstanding > 0
             was_prefill = seq.is_prefill
-            if not was_prefill:
-                if not self._reserve_decode_slot(seq, protected):
-                    continue
-                self.block_manager.may_append(seq)
+            if seq.is_speculative and token_budget < outstanding:
+                continue
             num_tokens = min(outstanding, token_budget)
+            if not was_prefill:
+                if not self._reserve_decode_slots(
+                    seq, protected, num_tokens
+                ):
+                    continue
+                self.block_manager.may_append_tokens(seq, num_tokens)
             seq.num_scheduled_tokens = num_tokens
             scheduled_seqs.append(seq)
             protected.add(seq.seq_id)
@@ -95,7 +93,6 @@ class Scheduler:
             else:
                 decode_tokens += num_tokens
 
-        # New prompts consume only the budget left after running requests.
         while (
             self.waiting
             and token_budget > 0
@@ -120,21 +117,33 @@ class Scheduler:
             prefill_tokens += num_tokens
             token_budget -= num_tokens
 
-        assert scheduled_seqs
+        if not scheduled_seqs:
+            raise RuntimeError(
+                "scheduler could not reserve a speculative verification batch; "
+                "increase max_num_batched_tokens"
+            )
         reset_sequence_ids = tuple(self._reset_sequence_ids)
         self._reset_sequence_ids.clear()
         return SchedulerBatch(
             scheduled_seqs, prefill_tokens, decode_tokens, reset_sequence_ids
         )
 
-    def _reserve_decode_slot(self, seq: Sequence, protected: set[int]) -> bool:
-        while not self.block_manager.can_append(seq):
+    def _reserve_decode_slots(
+        self,
+        seq: Sequence,
+        protected: set[int],
+        num_input_tokens: int,
+    ) -> bool:
+        while not self.block_manager.can_append_tokens(seq, num_input_tokens):
             candidates = [
                 candidate
                 for candidate in reversed(self.running)
                 if candidate is not seq and candidate.seq_id not in protected
             ]
-            victim = next((candidate for candidate in candidates if candidate.is_prefill), None)
+            victim = next(
+                (candidate for candidate in candidates if candidate.is_prefill),
+                None,
+            )
             if victim is None:
                 victim = next(iter(candidates), None)
             if victim is None:
@@ -149,30 +158,106 @@ class Scheduler:
             self.running.remove(seq)
         seq.status = SequenceStatus.WAITING
         seq.num_scheduled_tokens = 0
+        seq.draft_token_ids.clear()
         self.block_manager.deallocate(seq)
         self._reset_sequence_ids.append(seq.seq_id)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, batch: SchedulerBatch, token_ids: list[int]):
-        expected_tokens = len(batch.sampled_sequences)
-        if len(token_ids) != expected_tokens:
+    def _append_output_token(self, seq: Sequence, token_id: int) -> bool:
+        seq.append_token(token_id)
+        reached_eos = not seq.ignore_eos and token_id == self.eos
+        reached_limit = seq.num_completion_tokens >= seq.max_tokens
+        if reached_eos or reached_limit:
+            seq.finish_reason = "stop" if reached_eos else "length"
+            seq.status = SequenceStatus.FINISHED
+            return True
+        return False
+
+    def postprocess(
+        self,
+        batch: SchedulerBatch,
+        token_ids: list[int] | list[list[int]],
+        *,
+        accepted_counts: list[int] | None = None,
+        next_draft_token_ids: list[int | None] | None = None,
+    ):
+        sampled = batch.sampled_sequences
+        if len(token_ids) != len(sampled):
             raise ValueError(
-                f"model returned {len(token_ids)} tokens for {expected_tokens} sampled sequences"
+                f"model returned {len(token_ids)} token groups for "
+                f"{len(sampled)} sampled sequences"
             )
-        token_iter = iter(token_ids)
+        token_groups = [
+            group if isinstance(group, list) else [group]
+            for group in token_ids
+        ]
+        if accepted_counts is None:
+            accepted_counts = [0] * len(sampled)
+        if next_draft_token_ids is None:
+            next_draft_token_ids = [None] * len(sampled)
+        if not (
+            len(accepted_counts)
+            == len(next_draft_token_ids)
+            == len(sampled)
+        ):
+            raise ValueError("speculative result metadata has the wrong length")
+
+        result_iter = iter(
+            zip(token_groups, accepted_counts, next_draft_token_ids)
+        )
         for seq in batch.sequences:
             will_sample = seq.will_sample
-            self.block_manager.hash_blocks(seq)
-            seq.num_cached_tokens += seq.num_scheduled_tokens
-            seq.num_scheduled_tokens = 0
             if not will_sample:
+                self.block_manager.hash_blocks(seq)
+                seq.num_cached_tokens += seq.num_scheduled_tokens
+                seq.num_scheduled_tokens = 0
                 continue
-            token_id = next(token_iter)
-            seq.append_token(token_id)
-            reached_eos = not seq.ignore_eos and token_id == self.eos
-            reached_limit = seq.num_completion_tokens == seq.max_tokens
-            if reached_eos or reached_limit:
-                seq.finish_reason = "stop" if reached_eos else "length"
-                seq.status = SequenceStatus.FINISHED
+
+            outputs, accepted, next_draft = next(result_iter)
+            previous_drafts = list(seq.draft_token_ids)
+            is_speculative = bool(previous_drafts)
+            if is_speculative:
+                if not 0 <= accepted <= len(previous_drafts):
+                    raise ValueError(
+                        f"invalid accepted draft count {accepted} for "
+                        f"sequence {seq.seq_id}"
+                    )
+                if outputs[:accepted] != previous_drafts[:accepted]:
+                    raise ValueError(
+                        "accepted outputs do not match the proposed draft prefix"
+                    )
+                committed_inputs = 1 + accepted
+            else:
+                if accepted:
+                    raise ValueError(
+                        "non-speculative sequence cannot accept draft tokens"
+                    )
+                committed_inputs = seq.num_scheduled_tokens
+
+            original_scheduled = seq.num_scheduled_tokens
+            seq.num_scheduled_tokens = committed_inputs
+            finished = False
+            for token_id in outputs[:accepted]:
+                if self._append_output_token(seq, token_id):
+                    finished = True
+                    break
+
+            self.block_manager.hash_blocks(seq)
+            seq.num_cached_tokens += committed_inputs
+            seq.num_scheduled_tokens = 0
+            seq.draft_token_ids.clear()
+
+            if not finished:
+                for token_id in outputs[accepted:]:
+                    if self._append_output_token(seq, token_id):
+                        finished = True
+                        break
+
+            if finished:
                 self.block_manager.deallocate(seq)
                 self.running.remove(seq)
+            elif next_draft is not None:
+                seq.draft_token_ids.append(next_draft)
+
+            if original_scheduled < committed_inputs:
+                raise AssertionError("committed more target inputs than scheduled")

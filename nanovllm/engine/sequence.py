@@ -26,6 +26,7 @@ class Sequence:
         self.num_prefix_cached_tokens = 0
         self.num_scheduled_tokens = 0
         self.block_table = []
+        self.draft_token_ids: list[int] = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
@@ -43,19 +44,32 @@ class Sequence:
 
     @property
     def is_prefill(self):
-        """Whether outstanding work is prompt or recompute processing."""
+        """Whether outstanding committed work is prompt or recompute processing."""
         return (
             self.num_cached_tokens < self.num_prompt_tokens
             or self.num_tokens - self.num_cached_tokens > 1
         )
 
     @property
+    def num_target_inputs(self) -> int:
+        """Committed frontier plus any uncommitted speculative lookahead."""
+        return (
+            self.num_tokens
+            - self.num_cached_tokens
+            + len(self.draft_token_ids)
+        )
+
+    @property
     def will_sample(self):
-        """Whether this step catches compute up to the token frontier."""
+        """Whether this step reaches the target verification frontier."""
         return (
             self.num_scheduled_tokens > 0
-            and self.num_cached_tokens + self.num_scheduled_tokens == self.num_tokens
+            and self.num_scheduled_tokens == self.num_target_inputs
         )
+
+    @property
+    def is_speculative(self) -> bool:
+        return bool(self.draft_token_ids)
 
     @property
     def num_completion_tokens(self):
@@ -86,12 +100,42 @@ class Sequence:
         self.last_token = token_id
         self.num_tokens += 1
 
+    def scheduled_token_ids(self) -> list[int]:
+        start = self.num_cached_tokens
+        committed = self.token_ids[start : min(
+            self.num_tokens, start + self.num_scheduled_tokens
+        )]
+        remaining = self.num_scheduled_tokens - len(committed)
+        if remaining:
+            committed.extend(self.draft_token_ids[:remaining])
+        if len(committed) != self.num_scheduled_tokens:
+            raise ValueError(
+                f"sequence {self.seq_id} is missing speculative input tokens"
+            )
+        return committed
+
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        return (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.num_scheduled_tokens,
+            self.block_table,
+            self.draft_token_ids,
+            last_state,
+        )
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
+        (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.num_scheduled_tokens,
+            self.block_table,
+            self.draft_token_ids,
+            last_state,
+        ) = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]

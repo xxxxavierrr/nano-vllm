@@ -1,4 +1,6 @@
 import pickle
+from dataclasses import dataclass
+
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -14,6 +16,7 @@ from nanovllm.engine.cudagraph import (
     make_piecewise_capture_sizes,
 )
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.speculative import greedy_accept_k1
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.deltanet_chunk import (
@@ -21,10 +24,19 @@ from nanovllm.layers.deltanet_chunk import (
     DELTA_CHUNK_SIZE,
 )
 from nanovllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
+from nanovllm.models.qwen3_5_mtp import Qwen3_5MTP
 from nanovllm.layers.linear import quantize_fp8
 from nanovllm.layers.fp8_attention import FP8_QUERY_TILE_SIZE
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+from nanovllm.utils.mtp_loader import load_mtp_model
+
+
+@dataclass(slots=True)
+class SpeculativeBatchOutput:
+    token_ids: list[list[int]]
+    accepted_counts: list[int]
+    next_draft_token_ids: list[int | None]
 
 
 class ModelRunner:
@@ -72,13 +84,19 @@ class ModelRunner:
             self.model = Qwen3ForCausalLM(
                 hf_config, config.gptq_config
             )
+        self.mtp_model = None
+        if config.speculative_method == "mtp":
+            self.mtp_model = Qwen3_5MTP(hf_config)
         self.has_delta_state = hasattr(self.model, "create_delta_state")
         self.delta_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.delta_state_slab: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.delta_working_slab: tuple[torch.Tensor, torch.Tensor] | None = None
         self.delta_state_slots: dict[int, int] = {}
         self.free_delta_state_slots: list[int] = []
         self.delta_state_capacity: int | None = None
         load_model(self.model, config.model)
+        if self.mtp_model is not None:
+            load_mtp_model(self.mtp_model, config.mtp_model, hf_config)
         self.max_active_delta_states = 0
         if config.quantization == "fp8":
             quantize_fp8(self.model)
@@ -102,6 +120,13 @@ class ModelRunner:
             self.piecewise_capture_sizes,
         )
         self.last_execution_mode = ExecutionMode.EAGER.value
+        self.last_speculative_stats = {
+            "drafted": 0,
+            "proposed": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "bonus": 0,
+        }
         self.piecewise_model = None
         if self.cudagraph_mode.uses_piecewise:
             try:
@@ -159,12 +184,26 @@ class ModelRunner:
             del self.graphs, self.graph_pool
         if self.piecewise_model is not None:
             del self.piecewise_model
+        if self.mtp_model is not None:
+            del self.mtp_model
+            self.mtp_model = None
         self.delta_states.clear()
         self.delta_state_slots.clear()
         self.free_delta_state_slots.clear()
         self.delta_state_slab = None
+        self.delta_working_slab = None
+        for attribute in (
+            "mtp_kv_cache",
+            "kv_scale",
+            "kv_cache",
+            "sampler",
+            "model",
+        ):
+            if hasattr(self, attribute):
+                delattr(self, attribute)
         torch.cuda.synchronize()
         dist.destroy_process_group()
+        torch.cuda.empty_cache()
 
     def loop(self):
         while True:
@@ -197,7 +236,10 @@ class ModelRunner:
         return method(*args)
 
     def get_delta_state(
-        self, seq_id: int
+        self,
+        seq_id: int,
+        *,
+        working: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         if not self.has_delta_state:
             return None
@@ -235,7 +277,10 @@ class ModelRunner:
                 f"invalid DeltaNet state slot {slot} for capacity "
                 f"{self.delta_state_capacity}"
             )
-        conv_slab, recurrent_slab = self.delta_state_slab
+        slab = self.delta_working_slab if working else self.delta_state_slab
+        if slab is None:
+            raise RuntimeError("DeltaNet state slab is not initialized")
+        conv_slab, recurrent_slab = slab
         return conv_slab[:, slot], recurrent_slab[:, slot]
 
     def release_sequences(self, seq_ids):
@@ -259,6 +304,7 @@ class ModelRunner:
             num_seqs = 1
         seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
         for seq in seqs:
+            seq.temperature = 0.0
             seq.num_scheduled_tokens = seq_len
         self.run(seqs)
         self.release_sequences(tuple(seq.seq_id for seq in seqs))
@@ -272,12 +318,25 @@ class ModelRunner:
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        head_dim = getattr(
+            hf_config,
+            "head_dim",
+            hf_config.hidden_size // hf_config.num_attention_heads,
+        )
         attention_modules = [
             module
             for module in self.model.modules()
             if hasattr(module, "k_cache") and hasattr(module, "v_cache")
         ]
+        mtp_attention_modules = (
+            [
+                module
+                for module in self.mtp_model.modules()
+                if hasattr(module, "k_cache") and hasattr(module, "v_cache")
+            ]
+            if self.mtp_model is not None
+            else []
+        )
         num_attention_layers = len(attention_modules)
         use_fp8_kv = config.kv_cache_dtype == "fp8_e4m3"
         cache_dtype = torch.float8_e4m3fn if use_fp8_kv else hf_config.dtype
@@ -286,7 +345,7 @@ class ModelRunner:
             if use_fp8_kv
             else str(cache_dtype).removeprefix("torch.")
         )
-        payload_bytes = (
+        target_payload_bytes = (
             2
             * num_attention_layers
             * self.block_size
@@ -303,30 +362,59 @@ class ModelRunner:
             if use_fp8_kv
             else 0
         )
+        mtp_payload_bytes = (
+            2
+            * len(mtp_attention_modules)
+            * self.block_size
+            * num_kv_heads
+            * head_dim
+            * torch.tensor([], dtype=hf_config.dtype).element_size()
+        )
+        payload_bytes = target_payload_bytes + mtp_payload_bytes
         block_bytes = payload_bytes + scale_bytes
         config.kvcache_payload_bytes = payload_bytes
         config.kvcache_scale_bytes = scale_bytes
         config.kvcache_block_bytes = block_bytes
+        config.mtp_kvcache_bytes = mtp_payload_bytes
         available_bytes = int(
             total * config.gpu_memory_utilization - used - peak + current
         )
         reserved_delta_bytes = 0
         if self.has_delta_state:
             state_bytes = self.model.delta_state_bytes(hf_config.dtype)
-            total_capacity = (available_bytes - block_bytes) // state_bytes
+            state_copies = 2 if self.mtp_model is not None else 1
+            per_sequence_state_bytes = state_bytes * state_copies
+            total_capacity = (
+                available_bytes - block_bytes
+            ) // per_sequence_state_bytes
             if total_capacity < 1:
-                raise RuntimeError("insufficient GPU memory for one DeltaNet state")
-            half_capacity = max(1, available_bytes // 2 // state_bytes)
+                raise RuntimeError(
+                    "insufficient GPU memory for speculative DeltaNet state"
+                )
+            half_capacity = max(
+                1, available_bytes // 2 // per_sequence_state_bytes
+            )
             self.delta_state_capacity = min(
                 config.max_num_seqs, total_capacity, half_capacity
             )
             config.max_num_seqs = self.delta_state_capacity
-            reserved_delta_bytes = self.delta_state_capacity * state_bytes
+            reserved_delta_bytes = (
+                self.delta_state_capacity * per_sequence_state_bytes
+            )
             self.delta_states.clear()
             self.delta_state_slab = self.model.create_delta_state_slab(
                 self.delta_state_capacity,
                 device="cuda",
                 dtype=hf_config.dtype,
+            )
+            self.delta_working_slab = (
+                self.model.create_delta_state_slab(
+                    self.delta_state_capacity,
+                    device="cuda",
+                    dtype=hf_config.dtype,
+                )
+                if self.mtp_model is not None
+                else None
             )
             self.delta_state_slots.clear()
             self.free_delta_state_slots = list(
@@ -334,7 +422,8 @@ class ModelRunner:
             )
         cache_bytes = available_bytes - reserved_delta_bytes
         config.num_kvcache_blocks = cache_bytes // block_bytes
-        assert config.num_kvcache_blocks > 0
+        if config.num_kvcache_blocks <= 0:
+            raise RuntimeError("insufficient GPU memory for one KV cache block")
         self.kv_cache = torch.empty(
             2,
             num_attention_layers,
@@ -364,8 +453,27 @@ class ModelRunner:
             if self.kv_scale is not None:
                 module.k_scale.tensor = self.kv_scale[0, layer_id]
                 module.v_scale.tensor = self.kv_scale[1, layer_id]
+
+        self.mtp_kv_cache = None
+        if mtp_attention_modules:
+            self.mtp_kv_cache = torch.empty(
+                2,
+                len(mtp_attention_modules),
+                config.num_kvcache_blocks,
+                self.block_size,
+                num_kv_heads,
+                head_dim,
+                dtype=hf_config.dtype,
+                device="cuda",
+            )
+            for layer_id, module in enumerate(mtp_attention_modules):
+                module.k_cache.tensor = self.mtp_kv_cache[0, layer_id]
+                module.v_cache.tensor = self.mtp_kv_cache[1, layer_id]
+
         if self.rank == 0:
-            scale_mode = "per_token_per_kv_head" if use_fp8_kv else "none"
+            scale_mode = (
+                "per_token_per_kv_head" if use_fp8_kv else "none"
+            )
             print(
                 "KV cache: "
                 f"requested_dtype={config.kv_cache_dtype}, "
@@ -373,6 +481,7 @@ class ModelRunner:
                 f"scale_mode={scale_mode}, "
                 f"payload_bytes_per_block={payload_bytes}, "
                 f"scale_bytes_per_block={scale_bytes}, "
+                f"mtp_bytes_per_block={mtp_payload_bytes}, "
                 f"blocks={config.num_kvcache_blocks}, "
                 f"token_capacity={config.num_kvcache_blocks * self.block_size}"
             )
@@ -423,7 +532,13 @@ class ModelRunner:
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
-    def prepare_inputs(self, seqs: list[Sequence], descriptor: BatchDescriptor):
+    def prepare_inputs(
+        self,
+        seqs: list[Sequence],
+        descriptor: BatchDescriptor,
+        *,
+        use_working_delta: bool = False,
+    ):
         input_ids = []
         positions = []
         cu_seqlens_q = [0]
@@ -455,14 +570,11 @@ class ModelRunner:
                 raise ValueError(f"sequence {seq_id} has no scheduled tokens")
             end = start + seqlen_q
             seqlen_k = end
-            if seqlen_q == 1 and start == seq.num_tokens - 1:
+            if seqlen_q == 1 and not seq.draft_token_ids:
                 # Decode sequences only serialize last_token to TP workers.
                 input_ids.append(seq.last_token)
             else:
-                scheduled_token_ids = seq[start:end]
-                if len(scheduled_token_ids) != seqlen_q:
-                    raise ValueError(f"sequence {seq_id} is missing scheduled token ids")
-                input_ids.extend(scheduled_token_ids)
+                input_ids.extend(seq.scheduled_token_ids())
             positions.extend(range(start, end))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             sequence_slices.append((cu_seqlens_q[-2], cu_seqlens_q[-1]))
@@ -493,7 +605,12 @@ class ModelRunner:
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
             context_lens.append(seqlen_k)
             if seq.will_sample:
-                logits_indices.append(cu_seqlens_q[-1] - 1)
+                if seq.draft_token_ids:
+                    logits_indices.extend(
+                        range(cu_seqlens_q[-2], cu_seqlens_q[-1])
+                    )
+                else:
+                    logits_indices.append(cu_seqlens_q[-1] - 1)
             if not use_kv_cache:
                 continue
             start_block = start // self.block_size
@@ -539,10 +656,18 @@ class ModelRunner:
         delta_recurrent_sequences = None
         if self.has_delta_state:
             delta_states = tuple(
-                self.get_delta_state(seq.seq_id) for seq in seqs
+                self.get_delta_state(
+                    seq.seq_id, working=use_working_delta
+                )
+                for seq in seqs
             )
-            if self.delta_state_slab is not None:
-                delta_recurrent_slab = self.delta_state_slab[1]
+            selected_slab = (
+                self.delta_working_slab
+                if use_working_delta
+                else self.delta_state_slab
+            )
+            if selected_slab is not None:
+                delta_recurrent_slab = selected_slab[1]
                 delta_state_slots = torch.tensor(
                     [self.delta_state_slots[seq.seq_id] for seq in seqs],
                     dtype=torch.int32,
@@ -622,6 +747,235 @@ class ModelRunner:
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
+    def _delta_slot_indices(self, seqs: list[Sequence]) -> torch.Tensor:
+        if self.delta_state_slab is None:
+            return torch.empty(0, dtype=torch.long, device="cuda")
+        for seq in seqs:
+            self.get_delta_state(seq.seq_id)
+        return torch.tensor(
+            [self.delta_state_slots[seq.seq_id] for seq in seqs],
+            dtype=torch.long,
+            device="cuda",
+        )
+
+    def _copy_delta_bank(
+        self,
+        seqs: list[Sequence],
+        source: tuple[torch.Tensor, torch.Tensor],
+        destination: tuple[torch.Tensor, torch.Tensor],
+    ):
+        slots = self._delta_slot_indices(seqs)
+        if not slots.numel():
+            return
+        for source_tensor, destination_tensor in zip(source, destination):
+            destination_tensor.index_copy_(
+                1, slots, source_tensor.index_select(1, slots)
+            )
+
+    def _prepare_working_delta(self, seqs: list[Sequence]):
+        if self.delta_state_slab is None or self.delta_working_slab is None:
+            return
+        self._copy_delta_bank(
+            seqs, self.delta_state_slab, self.delta_working_slab
+        )
+
+    def _commit_working_delta(self, seqs: list[Sequence]):
+        if (
+            not seqs
+            or self.delta_state_slab is None
+            or self.delta_working_slab is None
+        ):
+            return
+        self._copy_delta_bank(
+            seqs, self.delta_working_slab, self.delta_state_slab
+        )
+
+    @torch.inference_mode()
+    def _replay_rejected_frontiers(self, seqs: list[Sequence]):
+        if not seqs:
+            return
+        saved = [
+            (seq, seq.num_scheduled_tokens, list(seq.draft_token_ids))
+            for seq in seqs
+        ]
+        try:
+            for seq, _, _ in saved:
+                seq.num_scheduled_tokens = 1
+                seq.draft_token_ids.clear()
+            descriptor = BatchDescriptor(
+                num_tokens=len(seqs),
+                num_padded_tokens=len(seqs),
+                num_seqs=len(seqs),
+                uniform_decode=True,
+                execution_mode=ExecutionMode.EAGER,
+            )
+            input_ids, positions = self.prepare_inputs(seqs, descriptor)
+            try:
+                self.run_model(input_ids, positions, descriptor)
+            finally:
+                reset_context()
+        finally:
+            for seq, scheduled, drafts in saved:
+                seq.num_scheduled_tokens = scheduled
+                seq.draft_token_ids[:] = drafts
+
+    def _mtp_slot_mapping(
+        self,
+        seq: Sequence,
+        start: int,
+        end: int,
+    ) -> list[int]:
+        slots = []
+        start_block = start // self.block_size
+        end_block = (end + self.block_size - 1) // self.block_size
+        for block_index in range(start_block, end_block):
+            slot_start = seq.block_table[block_index] * self.block_size
+            if block_index == start_block:
+                slot_start += start % self.block_size
+            slot_end = (
+                seq.block_table[block_index] * self.block_size
+                + self.block_size
+            )
+            if block_index == end_block - 1:
+                slot_end = (
+                    seq.block_table[block_index] * self.block_size
+                    + end
+                    - block_index * self.block_size
+                )
+            slots.extend(range(slot_start, slot_end))
+        return slots
+
+    @torch.inference_mode()
+    def _run_mtp_proposal(
+        self,
+        seqs: list[Sequence],
+        target_hidden_states: torch.Tensor,
+        token_groups: list[list[int]],
+        accepted_counts: list[int],
+    ) -> list[int | None]:
+        if self.mtp_model is None:
+            return [None] * len([seq for seq in seqs if seq.will_sample])
+
+        hidden_parts = []
+        next_token_ids = []
+        positions = []
+        cu_seqlens_q = [0]
+        cu_seqlens_k = [0]
+        slot_mapping = []
+        context_lens = []
+        logits_indices = []
+        sampled_mask = []
+        offset = 0
+        group_index = 0
+        use_kv_cache = all(bool(seq.block_table) for seq in seqs)
+        if any(bool(seq.block_table) for seq in seqs) != use_kv_cache:
+            raise ValueError("MTP batch mixes cached and uncached sequences")
+
+        for seq in seqs:
+            scheduled = seq.num_scheduled_tokens
+            sequence_hidden = target_hidden_states[offset : offset + scheduled]
+            offset += scheduled
+            if seq.will_sample:
+                outputs = token_groups[group_index]
+                accepted = accepted_counts[group_index]
+                valid_inputs = (
+                    1 + accepted if seq.draft_token_ids else scheduled
+                )
+                target_inputs = seq.scheduled_token_ids()[:valid_inputs]
+                shifted_ids = target_inputs[1:] + [outputs[-1]]
+                group_index += 1
+                sampled_mask.append(True)
+            else:
+                valid_inputs = scheduled
+                start = seq.num_cached_tokens
+                shifted_ids = seq.token_ids[
+                    start + 1 : start + valid_inputs + 1
+                ]
+                sampled_mask.append(False)
+            if len(shifted_ids) != valid_inputs:
+                raise ValueError(
+                    f"cannot build shifted MTP inputs for sequence {seq.seq_id}"
+                )
+
+            start = seq.num_cached_tokens
+            end = start + valid_inputs
+            hidden_parts.append(sequence_hidden[:valid_inputs])
+            next_token_ids.extend(shifted_ids)
+            positions.extend(range(start, end))
+            cu_seqlens_q.append(cu_seqlens_q[-1] + valid_inputs)
+            cu_seqlens_k.append(cu_seqlens_k[-1] + end)
+            context_lens.append(end)
+            if seq.will_sample:
+                logits_indices.append(cu_seqlens_q[-1] - 1)
+            if use_kv_cache:
+                slot_mapping.extend(self._mtp_slot_mapping(seq, start, end))
+
+        num_tokens = len(next_token_ids)
+        if num_tokens == 0:
+            return []
+        hidden_states = torch.cat(hidden_parts, dim=0)
+        input_ids = torch.tensor(
+            next_token_ids, dtype=torch.long, pin_memory=True
+        ).cuda(non_blocking=True)
+        positions_tensor = torch.tensor(
+            positions, dtype=torch.long, pin_memory=True
+        ).cuda(non_blocking=True)
+        cu_q = torch.tensor(
+            cu_seqlens_q, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        cu_k = torch.tensor(
+            cu_seqlens_k, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        slots = torch.tensor(
+            slot_mapping, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        context_lens_tensor = torch.tensor(
+            context_lens, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        logits_indices_tensor = torch.tensor(
+            logits_indices, dtype=torch.long, pin_memory=True
+        ).cuda(non_blocking=True)
+        block_tables = (
+            self.prepare_block_tables(seqs) if use_kv_cache else None
+        )
+        uniform_decode = use_kv_cache and all(
+            end - start == 1
+            for start, end in zip(cu_seqlens_q[:-1], cu_seqlens_q[1:])
+        )
+        set_context(
+            cu_seqlens_q=cu_q,
+            cu_seqlens_k=cu_k,
+            max_seqlen_q=max(
+                end - start
+                for start, end in zip(
+                    cu_seqlens_q[:-1], cu_seqlens_q[1:]
+                )
+            ),
+            max_seqlen_k=max(context_lens),
+            slot_mapping=slots,
+            block_tables=block_tables,
+            logits_indices=logits_indices_tensor,
+            context_lens=context_lens_tensor,
+            use_kv_cache=use_kv_cache,
+            is_uniform_decode=uniform_decode,
+            num_actual_tokens=num_tokens,
+            num_padded_tokens=num_tokens,
+        )
+        try:
+            embeddings = (
+                self.model.model.language_model.embed_tokens(input_ids)
+            )
+            mtp_hidden = self.mtp_model(
+                positions_tensor, hidden_states, embeddings
+            )
+            if not logits_indices:
+                return []
+            logits = self.model.compute_logits(mtp_hidden)
+            proposal_ids = logits.argmax(dim=-1).tolist()
+            return proposal_ids
+        finally:
+            reset_context()
+
     @torch.inference_mode()
     def run_model(
         self,
@@ -664,7 +1018,14 @@ class ModelRunner:
         raise ValueError(f"unsupported execution mode: {descriptor.execution_mode}")
 
     @torch.inference_mode()
-    def run(self, seqs: list[Sequence]) -> list[int]:
+    def run(self, seqs: list[Sequence]) -> list[int] | SpeculativeBatchOutput:
+        self.last_speculative_stats = {
+            "drafted": 0,
+            "proposed": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "bonus": 0,
+        }
         sampled_seqs = [seq for seq in seqs if seq.will_sample]
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs)
         is_uniform_decode = all(
@@ -675,15 +1036,117 @@ class ModelRunner:
             len(seqs),
             is_uniform_decode,
         )
-        input_ids, positions = self.prepare_inputs(seqs, descriptor)
+
+        use_speculative = self.mtp_model is not None
+        if use_speculative and any(seq.temperature != 0 for seq in sampled_seqs):
+            raise ValueError(
+                "MTP k=1 correctness milestone currently supports greedy "
+                "decoding only (temperature=0)"
+            )
+        has_verification = use_speculative and any(
+            seq.is_speculative for seq in sampled_seqs
+        )
+        if has_verification:
+            self._prepare_working_delta(seqs)
+
+        input_ids, positions = self.prepare_inputs(
+            seqs,
+            descriptor,
+            use_working_delta=has_verification,
+        )
         try:
             hidden_states = self.run_model(input_ids, positions, descriptor)
             self.last_execution_mode = descriptor.execution_mode.value
             if not sampled_seqs:
+                if use_speculative:
+                    self._run_mtp_proposal(seqs, hidden_states, [], [])
                 return [] if self.rank == 0 else None
-            temperatures = self.prepare_sample(sampled_seqs) if self.rank == 0 else None
+
             logits = self.model.compute_logits(hidden_states)
-            return self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+            if not use_speculative:
+                temperatures = (
+                    self.prepare_sample(sampled_seqs)
+                    if self.rank == 0
+                    else None
+                )
+                return (
+                    self.sampler(logits, temperatures).tolist()
+                    if self.rank == 0
+                    else None
+                )
+
+            token_groups: list[list[int]] = []
+            accepted_counts: list[int] = []
+            rejected_seqs: list[Sequence] = []
+            committed_working_seqs: list[Sequence] = [
+                seq for seq in seqs if not seq.will_sample
+            ]
+            logit_offset = 0
+            for seq in sampled_seqs:
+                if seq.is_speculative:
+                    if len(seq.draft_token_ids) != 1:
+                        raise ValueError(
+                            "MTP k=1 expects exactly one draft token"
+                        )
+                    verification_logits = logits[logit_offset : logit_offset + 2]
+                    logit_offset += 2
+                    target_tokens = verification_logits.argmax(dim=-1).tolist()
+                    outputs, accepted = greedy_accept_k1(
+                        target_tokens, seq.draft_token_ids[0]
+                    )
+                    token_groups.append(outputs)
+                    accepted_counts.append(accepted)
+                    if accepted:
+                        committed_working_seqs.append(seq)
+                    else:
+                        rejected_seqs.append(seq)
+                else:
+                    token_groups.append(
+                        [int(logits[logit_offset].argmax().item())]
+                    )
+                    accepted_counts.append(0)
+                    logit_offset += 1
+                    if has_verification:
+                        committed_working_seqs.append(seq)
+            if logit_offset != logits.size(0):
+                raise ValueError("target verification logits were not fully consumed")
+
+            if has_verification:
+                self._commit_working_delta(committed_working_seqs)
+                self._replay_rejected_frontiers(rejected_seqs)
+
+            proposals = self._run_mtp_proposal(
+                seqs,
+                hidden_states,
+                token_groups,
+                accepted_counts,
+            )
+            if len(proposals) != len(sampled_seqs):
+                raise ValueError("MTP proposal count does not match sampled requests")
+            proposed = sum(
+                len(seq.draft_token_ids) for seq in sampled_seqs
+            )
+            accepted = sum(accepted_counts)
+            self.last_speculative_stats = {
+                "drafted": len(proposals),
+                "proposed": proposed,
+                "accepted": accepted,
+                "rejected": proposed - accepted,
+                "bonus": sum(
+                    int(
+                        seq.is_speculative
+                        and accepted_count == len(seq.draft_token_ids)
+                    )
+                    for seq, accepted_count in zip(
+                        sampled_seqs, accepted_counts
+                    )
+                ),
+            }
+            return SpeculativeBatchOutput(
+                token_ids=token_groups,
+                accepted_counts=accepted_counts,
+                next_draft_token_ids=proposals,
+            )
         finally:
             reset_context()
 
