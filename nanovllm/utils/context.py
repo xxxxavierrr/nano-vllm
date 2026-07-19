@@ -21,6 +21,10 @@ class Context:
     delta_states: tuple[tuple[torch.Tensor, torch.Tensor], ...] = ()
     delta_recurrent_slab: torch.Tensor | None = None
     delta_state_slots: torch.Tensor | None = None
+    delta_chunk_indices: torch.Tensor | None = None
+    delta_cu_chunks: torch.Tensor | None = None
+    delta_chunk_sequences: torch.Tensor | None = None
+    delta_recurrent_sequences: torch.Tensor | None = None
 
 
 _CONTEXT = Context()
@@ -48,6 +52,10 @@ def set_context(
     delta_states=(),
     delta_recurrent_slab=None,
     delta_state_slots=None,
+    delta_chunk_indices=None,
+    delta_cu_chunks=None,
+    delta_chunk_sequences=None,
+    delta_recurrent_sequences=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -67,6 +75,10 @@ def set_context(
         delta_states=delta_states,
         delta_recurrent_slab=delta_recurrent_slab,
         delta_state_slots=delta_state_slots,
+        delta_chunk_indices=delta_chunk_indices,
+        delta_cu_chunks=delta_cu_chunks,
+        delta_chunk_sequences=delta_chunk_sequences,
+        delta_recurrent_sequences=delta_recurrent_sequences,
     )
 
 

@@ -16,6 +16,10 @@ from nanovllm.engine.cudagraph import (
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
+from nanovllm.layers.deltanet_chunk import (
+    DELTA_CHUNK_MIN_TOKENS,
+    DELTA_CHUNK_SIZE,
+)
 from nanovllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from nanovllm.layers.linear import quantize_fp8
 from nanovllm.utils.context import set_context, get_context, reset_context
@@ -314,6 +318,10 @@ class ModelRunner:
         max_seqlen_q = 0
         max_seqlen_k = 0
         sequence_slices = []
+        delta_chunk_indices_host = []
+        delta_cu_chunks_host = [0]
+        delta_chunk_sequences_host = []
+        delta_recurrent_sequences_host = []
         slot_mapping = []
         logits_indices = []
         context_lens = []
@@ -340,6 +348,20 @@ class ModelRunner:
             positions.extend(range(start, end))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             sequence_slices.append((cu_seqlens_q[-2], cu_seqlens_q[-1]))
+            sequence_index = len(sequence_slices) - 1
+            if seqlen_q >= DELTA_CHUNK_MIN_TOKENS:
+                delta_chunk_sequences_host.append(sequence_index)
+                num_delta_chunks = (
+                    seqlen_q + DELTA_CHUNK_SIZE - 1
+                ) // DELTA_CHUNK_SIZE
+                delta_chunk_indices_host.extend(
+                    (sequence_index, chunk) for chunk in range(num_delta_chunks)
+                )
+                delta_cu_chunks_host.append(
+                    delta_cu_chunks_host[-1] + num_delta_chunks
+                )
+            else:
+                delta_recurrent_sequences_host.append(sequence_index)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
@@ -385,6 +407,10 @@ class ModelRunner:
         delta_states = ()
         delta_recurrent_slab = None
         delta_state_slots = None
+        delta_chunk_indices = None
+        delta_cu_chunks = None
+        delta_chunk_sequences = None
+        delta_recurrent_sequences = None
         if self.has_delta_state:
             delta_states = tuple(
                 self.get_delta_state(seq.seq_id) for seq in seqs
@@ -393,6 +419,26 @@ class ModelRunner:
                 delta_recurrent_slab = self.delta_state_slab[1]
                 delta_state_slots = torch.tensor(
                     [self.delta_state_slots[seq.seq_id] for seq in seqs],
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
+                delta_chunk_indices = torch.tensor(
+                    delta_chunk_indices_host,
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).reshape(-1, 2).cuda(non_blocking=True)
+                delta_cu_chunks = torch.tensor(
+                    delta_cu_chunks_host,
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
+                delta_chunk_sequences = torch.tensor(
+                    delta_chunk_sequences_host,
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
+                delta_recurrent_sequences = torch.tensor(
+                    delta_recurrent_sequences_host,
                     dtype=torch.int32,
                     pin_memory=True,
                 ).cuda(non_blocking=True)
@@ -415,6 +461,10 @@ class ModelRunner:
             delta_states=delta_states,
             delta_recurrent_slab=delta_recurrent_slab,
             delta_state_slots=delta_state_slots,
+            delta_chunk_indices=delta_chunk_indices,
+            delta_cu_chunks=delta_cu_chunks,
+            delta_chunk_sequences=delta_chunk_sequences,
+            delta_recurrent_sequences=delta_recurrent_sequences,
             is_uniform_decode=is_uniform_decode,
             num_actual_tokens=num_actual_tokens,
             num_padded_tokens=model_num_tokens,

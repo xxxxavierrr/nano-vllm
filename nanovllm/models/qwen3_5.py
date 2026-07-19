@@ -11,6 +11,10 @@ from nanovllm.layers.deltanet import (
     gated_delta_recurrent,
     gated_delta_recurrent_packed,
 )
+from nanovllm.layers.deltanet_chunk import (
+    DELTA_CHUNK_MIN_TOKENS,
+    gated_delta_hybrid_packed,
+)
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.layers.gptq import GPTQConfig
 from nanovllm.layers.linear import (
@@ -218,8 +222,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         states: tuple[tuple[torch.Tensor, torch.Tensor], ...],
         slices: tuple[tuple[int, int], ...],
         cu_seqlens: torch.Tensor,
+        chunk_indices: torch.Tensor,
+        cu_chunks: torch.Tensor,
+        chunk_sequences: torch.Tensor,
+        recurrent_sequences: torch.Tensor,
         state_slots: torch.Tensor,
         recurrent_state_slab: torch.Tensor,
+        max_seqlen_q: int,
     ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
         projected_qkv = self.in_proj_qkv(hidden_states)
@@ -262,16 +271,33 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             * F.softplus(a.float() + self.dt_bias.float())
         ).exp()
 
-        core = gated_delta_recurrent_packed(
-            query,
-            key,
-            value,
-            beta.float(),
-            decay,
-            cu_seqlens,
-            state_slots,
-            recurrent_state_slab,
-        ).to(hidden_states.dtype)
+        if max_seqlen_q >= DELTA_CHUNK_MIN_TOKENS:
+            core = gated_delta_hybrid_packed(
+                query,
+                key,
+                value,
+                beta.float(),
+                decay,
+                cu_seqlens,
+                chunk_indices,
+                cu_chunks,
+                chunk_sequences,
+                recurrent_sequences,
+                state_slots,
+                recurrent_state_slab,
+            )
+        else:
+            core = gated_delta_recurrent_packed(
+                query,
+                key,
+                value,
+                beta.float(),
+                decay,
+                cu_seqlens,
+                state_slots,
+                recurrent_state_slab,
+            )
+        core = core.to(hidden_states.dtype)
         core = self.norm(core, z)
         return self.out_proj(core.reshape(num_tokens, self.value_dim))
 
@@ -290,15 +316,27 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             raise ValueError("DeltaNet state count does not match packed sequences")
 
         if context.delta_recurrent_slab is not None:
-            if context.delta_state_slots is None or context.cu_seqlens_q is None:
+            if (
+                context.delta_state_slots is None
+                or context.cu_seqlens_q is None
+                or context.delta_chunk_indices is None
+                or context.delta_cu_chunks is None
+                or context.delta_chunk_sequences is None
+                or context.delta_recurrent_sequences is None
+            ):
                 raise ValueError("packed DeltaNet metadata is incomplete")
             output = self._forward_packed(
                 real_hidden_states,
                 states,
                 slices,
                 context.cu_seqlens_q,
+                context.delta_chunk_indices,
+                context.delta_cu_chunks,
+                context.delta_chunk_sequences,
+                context.delta_recurrent_sequences,
                 context.delta_state_slots,
                 context.delta_recurrent_slab[self.state_idx],
+                context.max_seqlen_q,
             )
         else:
             outputs = [
