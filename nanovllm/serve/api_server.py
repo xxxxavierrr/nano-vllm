@@ -388,6 +388,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--startup-timeout", type=float, default=1200.0)
     parser.add_argument("--max-pending-requests", type=int, default=1024)
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
+    parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--device-ids", type=_parse_device_ids)
     parser.add_argument("--master-port", type=int, default=2333)
@@ -427,6 +428,7 @@ def main(argv: list[str] | None = None):
     shm_name = args.shm_name or f"nanovllm-{uuid4().hex}"
     engine_kwargs = {
         "quantization": args.quantization,
+        "kv_cache_dtype": args.kv_cache_dtype,
         "tensor_parallel_size": args.tensor_parallel_size,
         "device_ids": args.device_ids,
         "master_port": args.master_port,

@@ -13,6 +13,10 @@ class Context:
     block_tables: torch.Tensor | None = None
     logits_indices: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
+    query_tile_seq_ids: torch.Tensor | None = None
+    query_tile_starts: torch.Tensor | None = None
+    query_tile_lens: torch.Tensor | None = None
+    query_tile_positions: torch.Tensor | None = None
     use_kv_cache: bool = False
     is_uniform_decode: bool = False
     num_actual_tokens: int = 0
@@ -44,6 +48,10 @@ def set_context(
     block_tables=None,
     logits_indices=None,
     context_lens=None,
+    query_tile_seq_ids=None,
+    query_tile_starts=None,
+    query_tile_lens=None,
+    query_tile_positions=None,
     use_kv_cache=False,
     is_uniform_decode=False,
     num_actual_tokens=0,
@@ -67,6 +75,10 @@ def set_context(
         block_tables=block_tables,
         logits_indices=logits_indices,
         context_lens=context_lens,
+        query_tile_seq_ids=query_tile_seq_ids,
+        query_tile_starts=query_tile_starts,
+        query_tile_lens=query_tile_lens,
+        query_tile_positions=query_tile_positions,
         use_kv_cache=use_kv_cache,
         is_uniform_decode=is_uniform_decode,
         num_actual_tokens=num_actual_tokens,

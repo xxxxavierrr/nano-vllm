@@ -6,6 +6,10 @@ import triton.language as tl
 
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.utils.context import get_context
+from nanovllm.layers.fp8_attention import (
+    fp8_paged_attention,
+    store_fp8_kvcache,
+)
 
 
 class KVCacheHandle:
@@ -66,6 +70,8 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.k_cache = KVCacheHandle(torch.tensor([]))
         self.v_cache = KVCacheHandle(torch.tensor([]))
+        self.k_scale = KVCacheHandle(torch.tensor([]))
+        self.v_scale = KVCacheHandle(torch.tensor([]))
 
     @torch.compiler.disable
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
@@ -79,8 +85,35 @@ class Attention(nn.Module):
         v = v[:num_actual_tokens]
         k_cache, v_cache = self.k_cache.tensor, self.v_cache.tensor
         if k_cache.numel() and v_cache.numel():
-            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        if context.is_uniform_decode:
+            if k_cache.dtype == torch.float8_e4m3fn:
+                store_fp8_kvcache(
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    self.k_scale.tensor,
+                    self.v_scale.tensor,
+                    context.slot_mapping,
+                )
+            else:
+                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+        if context.use_kv_cache and k_cache.dtype == torch.float8_e4m3fn:
+            o = fp8_paged_attention(
+                q,
+                k_cache,
+                v_cache,
+                self.k_scale.tensor,
+                self.v_scale.tensor,
+                context.block_tables,
+                context.context_lens,
+                context.query_tile_seq_ids,
+                context.query_tile_starts,
+                context.query_tile_lens,
+                context.query_tile_positions,
+                self.scale,
+                k_cache.shape[1],
+            )
+        elif context.is_uniform_decode:
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
                                         cache_seqlens=context.context_lens, block_table=context.block_tables,
                                         softmax_scale=self.scale, causal=True)

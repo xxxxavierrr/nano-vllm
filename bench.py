@@ -97,6 +97,7 @@ def parse_args(argv: list[str] | None = None):
     )
     parser.add_argument("--label", default="nano-vllm")
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
+    parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument("--num-requests", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=256)
     parser.add_argument("--output-len", type=int, default=128)
@@ -160,6 +161,7 @@ def main(argv: list[str] | None = None):
     llm = LLM(
         args.model,
         quantization=args.quantization,
+        kv_cache_dtype=args.kv_cache_dtype,
         enforce_eager=args.enforce_eager,
         tensor_parallel_size=args.tensor_parallel_size,
         master_port=args.master_port,
@@ -345,6 +347,13 @@ def main(argv: list[str] | None = None):
             "model_dtype": str(config.hf_config.dtype).removeprefix("torch."),
             "model_family": config.model_family,
             "quantization": config.quantization or "none",
+            "kv_cache_dtype": config.kv_cache_dtype,
+            "kv_cache_storage_dtype": config.kvcache_storage_dtype,
+            "kv_cache_scale_mode": (
+                "per_token_per_kv_head"
+                if config.kv_cache_dtype == "fp8_e4m3"
+                else "none"
+            ),
             "tensor_parallel_size": args.tensor_parallel_size,
             "master_port": args.master_port,
             "enforce_eager": args.enforce_eager,
@@ -422,6 +431,11 @@ def main(argv: list[str] | None = None):
         },
         "memory": {
             "model_storage_mib": (parameter_bytes + buffer_bytes) / 2**20,
+            "kv_cache_dtype": config.kv_cache_dtype,
+            "kv_cache_payload_bytes_per_block": config.kvcache_payload_bytes,
+            "kv_cache_storage_dtype": config.kvcache_storage_dtype,
+            "kv_cache_scale_bytes_per_block": config.kvcache_scale_bytes,
+            "kv_cache_bytes_per_block": config.kvcache_block_bytes,
             "kv_cache_blocks": config.num_kvcache_blocks,
             "kv_cache_token_capacity": config.num_kvcache_blocks * config.kvcache_block_size,
             "delta_state_per_request_mib": (

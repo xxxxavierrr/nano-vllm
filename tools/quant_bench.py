@@ -11,6 +11,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
+    parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument("--max-tokens", type=int, default=128)
     args = parser.parse_args()
 
@@ -19,6 +20,7 @@ def main():
     llm = LLM(
         os.path.expanduser(args.model),
         quantization=args.quantization,
+        kv_cache_dtype=args.kv_cache_dtype,
         enforce_eager=True,
         tensor_parallel_size=1,
     )
@@ -51,6 +53,11 @@ def main():
     print(f"quantization={args.quantization or 'none'}")
     print(f"init_seconds={init_seconds:.3f}")
     print(f"model_storage_mib={(parameter_bytes + buffer_bytes) / 2**20:.2f}")
+    print(f"kv_cache_dtype={config.kv_cache_dtype}")
+    print(f"kv_cache_payload_bytes_per_block={config.kvcache_payload_bytes}")
+    print(f"kv_cache_storage_dtype={config.kvcache_storage_dtype}")
+    print(f"kv_cache_scale_bytes_per_block={config.kvcache_scale_bytes}")
+    print(f"kv_cache_bytes_per_block={config.kvcache_block_bytes}")
     print(f"kv_cache_blocks={config.num_kvcache_blocks}")
     print(f"kv_cache_token_capacity={config.num_kvcache_blocks * config.kvcache_block_size}")
     print(f"generation_seconds={generation_seconds:.3f}")

@@ -46,12 +46,31 @@ outputs[0]["text"]
 ## FP8 Quantization
 
 On GPUs with native FP8 support, linear weights and activations can be quantized
-to FP8 while embeddings, normalization, logits, and the KV cache remain in the
-model's original dtype:
+to FP8 while embeddings, normalization, and logits remain in the model's
+original dtype. KV-cache precision is selected independently:
 
 ```python
 llm = LLM("/YOUR/MODEL/PATH", quantization="fp8", enforce_eager=True)
 ```
+
+## FP8 KV Cache
+
+KV-cache precision is configured independently from weight quantization. On
+SM89 or newer GPUs, BF16 models can store K/V pages as E4M3 with independent
+FP16 scales per token, KV head, and K/V tensor:
+
+```python
+llm = LLM(
+    "/YOUR/MODEL/PATH",
+    kv_cache_dtype="fp8_e4m3",
+)
+```
+
+The serving and offline benchmark entrypoints expose
+`--kv-cache-dtype fp8_e4m3`; `tools/start_server.sh` accepts
+`KV_CACHE_DTYPE=fp8_e4m3`. Use `tools/bench_fp8_kv.py` for the
+attention-kernel comparison and `tools/compare_kv_outputs.py --model ...`
+for sequential BF16/FP8 greedy-output comparison.
 
 ## GPTQ W4A16
 
@@ -72,8 +91,9 @@ Run the implementation-independent kernel comparison with:
 python tools/bench_gptq_kernel.py
 ```
 
-The current model runtime still implements the Qwen3 architecture. Qwen3.6
-uses the Qwen3.5 architecture and will be connected in a later milestone.
+Qwen3.6 uses the Qwen3.5 hybrid DeltaNet/full-attention architecture and is
+supported with TP=1; GPTQ W4A16 weights and FP8 KV Cache can be enabled
+together.
 
 ## OpenAI-Compatible Serving
 

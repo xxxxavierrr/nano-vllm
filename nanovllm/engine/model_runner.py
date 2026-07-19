@@ -22,6 +22,7 @@ from nanovllm.layers.deltanet_chunk import (
 )
 from nanovllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from nanovllm.layers.linear import quantize_fp8
+from nanovllm.layers.fp8_attention import FP8_QUERY_TILE_SIZE
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
@@ -41,6 +42,25 @@ class ModelRunner:
         init_method = f"tcp://{config.master_host}:{config.master_port}"
         dist.init_process_group("nccl", init_method, world_size=self.world_size, rank=rank)
         torch.cuda.set_device(config.device_ids[rank])
+        if config.kv_cache_dtype == "fp8_e4m3":
+            capability = torch.cuda.get_device_capability()
+            head_dim = getattr(
+                hf_config,
+                "head_dim",
+                hf_config.hidden_size // hf_config.num_attention_heads,
+            )
+            if capability < (8, 9):
+                raise RuntimeError(
+                    "FP8 KV cache v1 requires an SM89 or newer CUDA GPU; "
+                    f"current capability is SM{capability[0]}{capability[1]}"
+                )
+            if hf_config.dtype != torch.bfloat16:
+                raise RuntimeError("FP8 KV cache v1 requires BF16 activations")
+            if head_dim not in (64, 128, 256):
+                raise RuntimeError(
+                    "FP8 KV cache v1 supports head_dim 64, 128, or 256; "
+                    f"got {head_dim}"
+                )
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
@@ -108,6 +128,7 @@ class ModelRunner:
                 ) from exc
             raise
         self.allocate_kv_cache()
+        self.warmup_fp8_kv_cache()
         if self.cudagraph_mode.uses_full:
             try:
                 self.capture_cudagraph()
@@ -258,10 +279,34 @@ class ModelRunner:
             if hasattr(module, "k_cache") and hasattr(module, "v_cache")
         ]
         num_attention_layers = len(attention_modules)
-        block_bytes = (
-            2 * num_attention_layers * self.block_size
-            * num_kv_heads * head_dim * hf_config.dtype.itemsize
+        use_fp8_kv = config.kv_cache_dtype == "fp8_e4m3"
+        cache_dtype = torch.float8_e4m3fn if use_fp8_kv else hf_config.dtype
+        config.kvcache_storage_dtype = (
+            "fp8_e4m3"
+            if use_fp8_kv
+            else str(cache_dtype).removeprefix("torch.")
         )
+        payload_bytes = (
+            2
+            * num_attention_layers
+            * self.block_size
+            * num_kv_heads
+            * head_dim
+            * cache_dtype.itemsize
+        )
+        scale_bytes = (
+            2
+            * num_attention_layers
+            * self.block_size
+            * num_kv_heads
+            * torch.tensor([], dtype=torch.float16).element_size()
+            if use_fp8_kv
+            else 0
+        )
+        block_bytes = payload_bytes + scale_bytes
+        config.kvcache_payload_bytes = payload_bytes
+        config.kvcache_scale_bytes = scale_bytes
+        config.kvcache_block_bytes = block_bytes
         available_bytes = int(
             total * config.gpu_memory_utilization - used - peak + current
         )
@@ -297,12 +342,80 @@ class ModelRunner:
             self.block_size,
             num_kv_heads,
             head_dim,
-            dtype=hf_config.dtype,
+            dtype=cache_dtype,
             device="cuda",
+        )
+        self.kv_scale = (
+            torch.empty(
+                2,
+                num_attention_layers,
+                config.num_kvcache_blocks,
+                self.block_size,
+                num_kv_heads,
+                dtype=torch.float16,
+                device="cuda",
+            )
+            if use_fp8_kv
+            else None
         )
         for layer_id, module in enumerate(attention_modules):
             module.k_cache.tensor = self.kv_cache[0, layer_id]
             module.v_cache.tensor = self.kv_cache[1, layer_id]
+            if self.kv_scale is not None:
+                module.k_scale.tensor = self.kv_scale[0, layer_id]
+                module.v_scale.tensor = self.kv_scale[1, layer_id]
+        if self.rank == 0:
+            scale_mode = "per_token_per_kv_head" if use_fp8_kv else "none"
+            print(
+                "KV cache: "
+                f"requested_dtype={config.kv_cache_dtype}, "
+                f"dtype={config.kvcache_storage_dtype}, "
+                f"scale_mode={scale_mode}, "
+                f"payload_bytes_per_block={payload_bytes}, "
+                f"scale_bytes_per_block={scale_bytes}, "
+                f"blocks={config.num_kvcache_blocks}, "
+                f"token_capacity={config.num_kvcache_blocks * self.block_size}"
+            )
+
+    def warmup_fp8_kv_cache(self):
+        if self.config.kv_cache_dtype != "fp8_e4m3":
+            return
+        num_tokens = min(FP8_QUERY_TILE_SIZE, self.config.max_model_len - 1)
+        if num_tokens <= 0:
+            raise RuntimeError("FP8 KV cache requires max_model_len at least 2")
+        seq = Sequence([0] * num_tokens)
+        seq.block_table = [0]
+        seq.num_scheduled_tokens = num_tokens
+        prefill = BatchDescriptor(
+            num_tokens=num_tokens,
+            num_padded_tokens=num_tokens,
+            num_seqs=1,
+            uniform_decode=False,
+            execution_mode=ExecutionMode.EAGER,
+        )
+        input_ids, positions = self.prepare_inputs([seq], prefill)
+        try:
+            self.model(input_ids, positions)
+        finally:
+            reset_context()
+
+        seq.num_cached_tokens = num_tokens
+        seq.append_token(0)
+        seq.num_scheduled_tokens = 1
+        decode = BatchDescriptor(
+            num_tokens=1,
+            num_padded_tokens=1,
+            num_seqs=1,
+            uniform_decode=True,
+            execution_mode=ExecutionMode.EAGER,
+        )
+        input_ids, positions = self.prepare_inputs([seq], decode)
+        try:
+            self.model(input_ids, positions)
+        finally:
+            reset_context()
+            self.release_sequences((seq.seq_id,))
+        torch.cuda.synchronize()
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
@@ -325,6 +438,11 @@ class ModelRunner:
         slot_mapping = []
         logits_indices = []
         context_lens = []
+        query_tile_seq_ids = []
+        use_fp8_kv = self.config.kv_cache_dtype == "fp8_e4m3"
+        query_tile_starts = []
+        query_tile_lens = []
+        query_tile_positions = []
         has_block_tables = [bool(seq.block_table) for seq in seqs]
         if any(has_block_tables) and not all(has_block_tables):
             raise ValueError("all sequences in a model batch must either use KV cache or be warmup sequences")
@@ -349,6 +467,14 @@ class ModelRunner:
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             sequence_slices.append((cu_seqlens_q[-2], cu_seqlens_q[-1]))
             sequence_index = len(sequence_slices) - 1
+            if use_fp8_kv:
+                for tile_offset in range(0, seqlen_q, FP8_QUERY_TILE_SIZE):
+                    query_tile_seq_ids.append(sequence_index)
+                    query_tile_starts.append(cu_seqlens_q[-2] + tile_offset)
+                    query_tile_lens.append(
+                        min(FP8_QUERY_TILE_SIZE, seqlen_q - tile_offset)
+                    )
+                    query_tile_positions.append(start + tile_offset)
             if seqlen_q >= DELTA_CHUNK_MIN_TOKENS:
                 delta_chunk_sequences_host.append(sequence_index)
                 num_delta_chunks = (
@@ -446,6 +572,22 @@ class ModelRunner:
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        if use_fp8_kv:
+            query_tile_seq_ids = torch.tensor(
+                query_tile_seq_ids, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True)
+            query_tile_starts = torch.tensor(
+                query_tile_starts, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True)
+            query_tile_lens = torch.tensor(
+                query_tile_lens, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True)
+            query_tile_positions = torch.tensor(
+                query_tile_positions, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True)
+        else:
+            query_tile_seq_ids = query_tile_starts = None
+            query_tile_lens = query_tile_positions = None
         logits_indices = torch.tensor(logits_indices, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         set_context(
             cu_seqlens_q=cu_seqlens_q,
@@ -456,6 +598,10 @@ class ModelRunner:
             block_tables=block_tables,
             logits_indices=logits_indices,
             context_lens=context_lens,
+            query_tile_seq_ids=query_tile_seq_ids,
+            query_tile_starts=query_tile_starts,
+            query_tile_lens=query_tile_lens,
+            query_tile_positions=query_tile_positions,
             use_kv_cache=use_kv_cache,
             sequence_slices=tuple(sequence_slices),
             delta_states=delta_states,
@@ -503,6 +649,16 @@ class ModelRunner:
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"].zero_()
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+            if self.config.kv_cache_dtype == "fp8_e4m3":
+                graph_vars["query_tile_seq_ids"].zero_()
+                graph_vars["query_tile_starts"].zero_()
+                graph_vars["query_tile_lens"].zero_()
+                graph_vars["query_tile_positions"].zero_()
+                num_tiles = context.query_tile_seq_ids.numel()
+                graph_vars["query_tile_seq_ids"][:num_tiles] = context.query_tile_seq_ids
+                graph_vars["query_tile_starts"][:num_tiles] = context.query_tile_starts
+                graph_vars["query_tile_lens"][:num_tiles] = context.query_tile_lens
+                graph_vars["query_tile_positions"][:num_tiles] = context.query_tile_positions
             graph.replay()
             return graph_vars["outputs"][:bs]
         raise ValueError(f"unsupported execution mode: {descriptor.execution_mode}")
@@ -566,6 +722,10 @@ class ModelRunner:
         positions = torch.zeros(max_bs, dtype=torch.int64, device="cuda")
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
         context_lens = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+        query_tile_seq_ids = torch.arange(max_bs, dtype=torch.int32, device="cuda")
+        query_tile_starts = torch.arange(max_bs, dtype=torch.int32, device="cuda")
+        query_tile_lens = torch.ones(max_bs, dtype=torch.int32, device="cuda")
+        query_tile_positions = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
         block_tables = torch.zeros(
             max_bs,
             max_num_blocks,
@@ -588,6 +748,10 @@ class ModelRunner:
                 slot_mapping=slot_mapping[:bs],
                 context_lens=context_lens[:bs],
                 block_tables=block_tables[:bs],
+                query_tile_seq_ids=query_tile_seq_ids[:bs],
+                query_tile_starts=query_tile_starts[:bs],
+                query_tile_lens=query_tile_lens[:bs],
+                query_tile_positions=query_tile_positions[:bs],
                 use_kv_cache=True,
                 is_uniform_decode=True,
                 num_actual_tokens=bs,
@@ -608,5 +772,9 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
+            query_tile_seq_ids=query_tile_seq_ids,
+            query_tile_starts=query_tile_starts,
+            query_tile_lens=query_tile_lens,
+            query_tile_positions=query_tile_positions,
             outputs=outputs,
         )

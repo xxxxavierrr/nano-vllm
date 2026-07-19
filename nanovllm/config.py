@@ -12,6 +12,7 @@ from nanovllm.layers.gptq import GPTQConfig
 class Config:
     model: str
     quantization: str | None = None
+    kv_cache_dtype: str = "auto"
     max_num_batched_tokens: int = 16384
     max_num_seqs: int = 512
     max_model_len: int = 4096
@@ -31,6 +32,10 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
+    kvcache_storage_dtype: str = field(init=False, default="")
+    kvcache_block_bytes: int = field(init=False, default=0)
+    kvcache_payload_bytes: int = field(init=False, default=0)
+    kvcache_scale_bytes: int = field(init=False, default=0)
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
@@ -84,6 +89,10 @@ class Config:
             self.enable_prefix_cache = False
         else:
             self.hf_config = outer_config
+
+        self.kv_cache_dtype = str(self.kv_cache_dtype).lower()
+        if self.kv_cache_dtype not in ("auto", "fp8_e4m3"):
+            raise ValueError("kv_cache_dtype must be 'auto' or 'fp8_e4m3'")
 
         self.cudagraph_mode = CUDAGraphMode.parse(self.cudagraph_mode)
         if self.enforce_eager:
