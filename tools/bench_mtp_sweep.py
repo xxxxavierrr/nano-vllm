@@ -11,6 +11,7 @@ from time import perf_counter
 import torch
 
 from nanovllm import LLM, SamplingParams
+from nanovllm.engine.cudagraph import CUDAGraphMode
 
 
 DEFAULT_PROMPTS = [
@@ -88,6 +89,13 @@ def parse_args():
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
     parser.add_argument("--max-num-seqs", type=int, default=8)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--cudagraph-mode",
+        choices=[mode.value for mode in CUDAGraphMode],
+        default=CUDAGraphMode.NONE.value,
+        help="NONE preserves the original eager benchmark baseline",
+    )
+    parser.add_argument("--piecewise-max-tokens", type=int, default=512)
     parser.add_argument("--master-port-base", type=int, default=2460)
     parser.add_argument("--ttft-slo-ms", type=float)
     parser.add_argument("--tpot-slo-ms", type=float)
@@ -112,6 +120,7 @@ def parse_args():
         args.repeats,
         args.max_num_batched_tokens,
         args.max_num_seqs,
+        args.piecewise_max_tokens,
     )
     if any(value <= 0 for value in positive) or args.warmup_requests < 0:
         parser.error("lengths, counts, and capacities must be positive")
@@ -401,7 +410,8 @@ def run_k(args, k: int, prompt_texts: list[str]):
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=args.gpu_memory_utilization,
-        enforce_eager=True,
+        cudagraph_mode=args.cudagraph_mode,
+        piecewise_max_tokens=args.piecewise_max_tokens,
         master_port=args.master_port_base + k,
     )
     init_seconds = perf_counter() - init_started
@@ -584,6 +594,8 @@ def main():
             "num_requests": args.num_requests,
             "concurrency": args.concurrency,
             "max_num_batched_tokens": args.max_num_batched_tokens,
+            "cudagraph_mode": args.cudagraph_mode,
+            "piecewise_max_tokens": args.piecewise_max_tokens,
             "closed_loop": True,
             "greedy": True,
             "ignore_eos": True,

@@ -23,6 +23,7 @@ class Context:
     num_padded_tokens: int = 0
     sequence_slices: tuple[tuple[int, int], ...] = ()
     delta_states: tuple[tuple[torch.Tensor, torch.Tensor], ...] = ()
+    delta_conv_slab: torch.Tensor | None = None
     delta_recurrent_slab: torch.Tensor | None = None
     delta_state_slots: torch.Tensor | None = None
     delta_chunk_indices: torch.Tensor | None = None
@@ -58,6 +59,7 @@ def set_context(
     num_padded_tokens=0,
     sequence_slices=(),
     delta_states=(),
+    delta_conv_slab=None,
     delta_recurrent_slab=None,
     delta_state_slots=None,
     delta_chunk_indices=None,
@@ -85,6 +87,7 @@ def set_context(
         num_padded_tokens=num_padded_tokens,
         sequence_slices=sequence_slices,
         delta_states=delta_states,
+        delta_conv_slab=delta_conv_slab,
         delta_recurrent_slab=delta_recurrent_slab,
         delta_state_slots=delta_state_slots,
         delta_chunk_indices=delta_chunk_indices,

@@ -62,6 +62,30 @@ def make_full_capture_sizes(max_batch_size: int) -> list[int]:
     return sorted(set(sizes))
 
 
+def infer_piecewise_capture_limit(
+    *,
+    requested_max_tokens: int,
+    max_num_batched_tokens: int,
+    max_num_seqs: int,
+    speculative_tokens: int,
+) -> int:
+    if min(
+        requested_max_tokens,
+        max_num_batched_tokens,
+        max_num_seqs,
+    ) <= 0:
+        raise ValueError("CUDA Graph capture limits must be positive")
+    if speculative_tokens < 0:
+        raise ValueError("speculative_tokens cannot be negative")
+    decode_query_len = 1 + speculative_tokens
+    inferred_limit = min(max_num_seqs * decode_query_len * 2, 512)
+    return min(
+        requested_max_tokens,
+        max_num_batched_tokens,
+        inferred_limit,
+    )
+
+
 class CUDAGraphDispatcher:
     def __init__(
         self,

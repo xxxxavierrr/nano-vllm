@@ -13,6 +13,7 @@ from nanovllm.engine.cudagraph import (
     CUDAGraphDispatcher,
     CUDAGraphMode,
     ExecutionMode,
+    infer_piecewise_capture_limit,
     make_full_capture_sizes,
     make_piecewise_capture_sizes,
 )
@@ -108,10 +109,22 @@ class ModelRunner:
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
         self.sampler = Sampler()
-        max_full_batch_size = min(self.config.max_num_seqs, 512)
-        max_piecewise_tokens = min(
-            self.config.piecewise_max_tokens,
-            self.config.max_num_batched_tokens,
+        # DeltaNet Full Graph replay is currently validated only for a single
+        # sequence. Larger uniform batches use Piecewise until the packed
+        # recurrent-state batch path is proven numerically equivalent.
+        max_full_batch_size = min(
+            self.config.max_num_seqs,
+            1 if self.has_delta_state else 512,
+        )
+        max_piecewise_tokens = infer_piecewise_capture_limit(
+            requested_max_tokens=self.config.piecewise_max_tokens,
+            max_num_batched_tokens=self.config.max_num_batched_tokens,
+            max_num_seqs=self.config.max_num_seqs,
+            speculative_tokens=(
+                self.config.num_speculative_tokens
+                if self.mtp_model is not None
+                else 0
+            ),
         )
         self.full_capture_sizes = make_full_capture_sizes(max_full_batch_size)
         self.piecewise_capture_sizes = make_piecewise_capture_sizes(max_piecewise_tokens)
@@ -318,6 +331,11 @@ class ModelRunner:
     def allocate_kv_cache(self):
         config = self.config
         hf_config = config.hf_config
+        # Piecewise CUDAGraph capture can leave several GiB in the ordinary
+        # caching allocator. Live graph-private pools survive empty_cache(),
+        # while releasable compilation/autotune blocks must not reduce the
+        # subsequent DeltaNet state and KV capacity calculation.
+        torch.cuda.empty_cache()
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
@@ -680,6 +698,7 @@ class ModelRunner:
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         delta_states = ()
+        delta_conv_slab = None
         delta_recurrent_slab = None
         delta_state_slots = None
         delta_chunk_indices = None
@@ -699,6 +718,7 @@ class ModelRunner:
                 else self.delta_state_slab
             )
             if selected_slab is not None:
+                delta_conv_slab = selected_slab[0]
                 delta_recurrent_slab = selected_slab[1]
                 delta_state_slots = torch.tensor(
                     [self.delta_state_slots[seq.seq_id] for seq in seqs],
@@ -762,6 +782,7 @@ class ModelRunner:
             use_kv_cache=use_kv_cache,
             sequence_slices=tuple(sequence_slices),
             delta_states=delta_states,
+            delta_conv_slab=delta_conv_slab,
             delta_recurrent_slab=delta_recurrent_slab,
             delta_state_slots=delta_state_slots,
             delta_chunk_indices=delta_chunk_indices,
@@ -1148,6 +1169,21 @@ class ModelRunner:
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"].zero_()
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+            if self.has_delta_state:
+                graph_vars["delta_state_slots"][:bs] = context.delta_state_slots
+                num_dummy_slots = descriptor.num_padded_tokens - bs
+                if num_dummy_slots:
+                    if len(self.free_delta_state_slots) < num_dummy_slots:
+                        raise RuntimeError(
+                            "Full CUDA Graph padding requires free DeltaNet state slots"
+                        )
+                    graph_vars["delta_state_slots"][bs:descriptor.num_padded_tokens] = (
+                        torch.tensor(
+                            self.free_delta_state_slots[:num_dummy_slots],
+                            dtype=torch.int32,
+                            device="cuda",
+                        )
+                    )
             if self.config.kv_cache_dtype == "fp8_e4m3":
                 graph_vars["query_tile_seq_ids"].zero_()
                 graph_vars["query_tile_starts"].zero_()
@@ -1369,6 +1405,11 @@ class ModelRunner:
         query_tile_starts = torch.arange(max_bs, dtype=torch.int32, device="cuda")
         query_tile_lens = torch.ones(max_bs, dtype=torch.int32, device="cuda")
         query_tile_positions = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+        delta_state_slots = torch.arange(max_bs, dtype=torch.int32, device="cuda")
+        delta_cu_seqlens = torch.arange(max_bs + 1, dtype=torch.int32, device="cuda")
+        empty_delta_pairs = torch.empty(0, 2, dtype=torch.int32, device="cuda")
+        empty_delta_sequences = torch.empty(0, dtype=torch.int32, device="cuda")
+        delta_cu_chunks = torch.zeros(1, dtype=torch.int32, device="cuda")
         block_tables = torch.zeros(
             max_bs,
             max_num_blocks,
@@ -1399,6 +1440,33 @@ class ModelRunner:
                 is_uniform_decode=True,
                 num_actual_tokens=bs,
                 num_padded_tokens=bs,
+                cu_seqlens_q=delta_cu_seqlens[:bs + 1],
+                max_seqlen_q=1,
+                delta_conv_slab=(
+                    self.delta_state_slab[0]
+                    if self.delta_state_slab is not None
+                    else None
+                ),
+                delta_recurrent_slab=(
+                    self.delta_state_slab[1]
+                    if self.delta_state_slab is not None
+                    else None
+                ),
+                delta_state_slots=(
+                    delta_state_slots[:bs] if self.has_delta_state else None
+                ),
+                delta_chunk_indices=(
+                    empty_delta_pairs if self.has_delta_state else None
+                ),
+                delta_cu_chunks=(
+                    delta_cu_chunks if self.has_delta_state else None
+                ),
+                delta_chunk_sequences=(
+                    empty_delta_sequences if self.has_delta_state else None
+                ),
+                delta_recurrent_sequences=(
+                    delta_state_slots[:bs] if self.has_delta_state else None
+                ),
             )
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
@@ -1419,5 +1487,6 @@ class ModelRunner:
             query_tile_starts=query_tile_starts,
             query_tile_lens=query_tile_lens,
             query_tile_positions=query_tile_positions,
+            delta_state_slots=delta_state_slots,
             outputs=outputs,
         )

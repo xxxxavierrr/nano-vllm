@@ -31,7 +31,11 @@ class Qwen3_5RMSNorm(nn.Module):
 
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
-        self.eps = eps
+        self.register_buffer(
+            "eps",
+            torch.tensor(eps, dtype=torch.float32),
+            persistent=False,
+        )
         self.weight = nn.Parameter(torch.zeros(hidden_size))
 
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -54,7 +58,11 @@ class Qwen3_5RMSNorm(nn.Module):
 class Qwen3_5RMSNormGated(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
-        self.eps = eps
+        self.register_buffer(
+            "eps",
+            torch.tensor(eps, dtype=torch.float32),
+            persistent=False,
+        )
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
@@ -220,6 +228,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self,
         hidden_states: torch.Tensor,
         states: tuple[tuple[torch.Tensor, torch.Tensor], ...],
+        conv_state_slab: torch.Tensor | None,
         slices: tuple[tuple[int, int], ...],
         cu_seqlens: torch.Tensor,
         chunk_indices: torch.Tensor,
@@ -229,6 +238,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         state_slots: torch.Tensor,
         recurrent_state_slab: torch.Tensor,
         max_seqlen_q: int,
+        uniform_decode: bool,
     ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
         projected_qkv = self.in_proj_qkv(hidden_states)
@@ -238,20 +248,49 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         beta = self.in_proj_b(hidden_states).sigmoid()
         a = self.in_proj_a(hidden_states)
 
-        conv_outputs = []
-        for (start, end), state in zip(slices, states):
-            conv_state = state[0][self.state_idx]
-            mixed_qkv = projected_qkv[start:end].transpose(0, 1)
+        if uniform_decode:
+            if conv_state_slab is None:
+                raise ValueError("uniform DeltaNet requires a convolution state slab")
+            num_sequences = state_slots.numel()
+            if num_tokens != num_sequences * max_seqlen_q:
+                raise ValueError("uniform DeltaNet token shape is inconsistent")
+            state_indices = state_slots.long()
+            conv_state = conv_state_slab[self.state_idx].index_select(
+                0, state_indices
+            )
+            mixed_qkv = projected_qkv.view(
+                num_sequences, max_seqlen_q, self.conv_dim
+            ).transpose(1, 2)
             conv_input = torch.cat((conv_state, mixed_qkv), dim=-1)
-            conv_state.copy_(conv_input[:, -self.conv_kernel_size :])
+            conv_state_slab[self.state_idx].index_copy_(
+                0,
+                state_indices,
+                conv_input[:, :, -self.conv_kernel_size :],
+            )
             convolved = F.conv1d(
-                conv_input.unsqueeze(0),
+                conv_input,
                 self.conv1d.weight,
                 bias=None,
                 groups=self.conv_dim,
-            )[0, :, -(end - start) :]
-            conv_outputs.append(F.silu(convolved.transpose(0, 1)))
-        mixed_qkv = torch.cat(conv_outputs, dim=0)
+            )[:, :, -max_seqlen_q:]
+            mixed_qkv = F.silu(convolved.transpose(1, 2)).reshape(
+                num_tokens, self.conv_dim
+            )
+        else:
+            conv_outputs = []
+            for (start, end), state in zip(slices, states):
+                conv_state = state[0][self.state_idx]
+                mixed_qkv = projected_qkv[start:end].transpose(0, 1)
+                conv_input = torch.cat((conv_state, mixed_qkv), dim=-1)
+                conv_state.copy_(conv_input[:, -self.conv_kernel_size :])
+                convolved = F.conv1d(
+                    conv_input.unsqueeze(0),
+                    self.conv1d.weight,
+                    bias=None,
+                    groups=self.conv_dim,
+                )[0, :, -(end - start) :]
+                conv_outputs.append(F.silu(convolved.transpose(0, 1)))
+            mixed_qkv = torch.cat(conv_outputs, dim=0)
 
         query, key, value = mixed_qkv.split(
             [self.key_dim, self.key_dim, self.value_dim], dim=-1
@@ -301,18 +340,22 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         core = self.norm(core, z)
         return self.out_proj(core.reshape(num_tokens, self.value_dim))
 
+    @torch.compiler.disable
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
         num_actual_tokens = context.num_actual_tokens or hidden_states.size(0)
         real_hidden_states = hidden_states[:num_actual_tokens]
         slices = context.sequence_slices or ((0, num_actual_tokens),)
         states = context.delta_states
-        if not states:
+        graph_safe_uniform = (
+            context.is_uniform_decode and context.delta_conv_slab is not None
+        )
+        if not states and not graph_safe_uniform:
             states = tuple(
                 self._transient_state(hidden_states.device, hidden_states.dtype)
                 for _ in slices
             )
-        if len(states) != len(slices):
+        if not graph_safe_uniform and len(states) != len(slices):
             raise ValueError("DeltaNet state count does not match packed sequences")
 
         if context.delta_recurrent_slab is not None:
@@ -328,6 +371,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             output = self._forward_packed(
                 real_hidden_states,
                 states,
+                context.delta_conv_slab,
                 slices,
                 context.cu_seqlens_q,
                 context.delta_chunk_indices,
@@ -337,6 +381,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 context.delta_state_slots,
                 context.delta_recurrent_slab[self.state_idx],
                 context.max_seqlen_q,
+                context.is_uniform_decode,
             )
         else:
             outputs = [

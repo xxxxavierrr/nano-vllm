@@ -1,5 +1,4 @@
 import os
-import warnings
 from dataclasses import dataclass, field
 
 from transformers import AutoConfig
@@ -129,18 +128,6 @@ class Config:
         self.cudagraph_mode = CUDAGraphMode.parse(self.cudagraph_mode)
         if self.enforce_eager:
             self.cudagraph_mode = CUDAGraphMode.NONE
-        if (
-            self.model_family == "qwen3_5"
-            and self.cudagraph_mode is not CUDAGraphMode.NONE
-        ):
-            warnings.warn(
-                "Qwen3.5/3.6 DeltaNet state mutation is eager-only in v1; "
-                "forcing cudagraph_mode=NONE",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            self.cudagraph_mode = CUDAGraphMode.NONE
-
         assert self.piecewise_max_tokens > 0
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8

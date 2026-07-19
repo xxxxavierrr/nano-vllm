@@ -5,6 +5,7 @@ from nanovllm.engine.cudagraph import (
     CUDAGraphDispatcher,
     CUDAGraphMode,
     ExecutionMode,
+    infer_piecewise_capture_limit,
     make_full_capture_sizes,
     make_piecewise_capture_sizes,
 )
@@ -63,6 +64,27 @@ def test_capture_size_generation_keeps_requested_limit():
     assert make_piecewise_capture_sizes(19) == [1, 2, 4, 8, 16, 19]
     assert make_full_capture_sizes(10) == [1, 2, 4, 8, 10]
     assert make_piecewise_capture_sizes(512) == [1, 2, 4, *range(8, 513, 8)]
+
+
+def test_piecewise_capture_limit_tracks_runtime_decode_scale():
+    assert infer_piecewise_capture_limit(
+        requested_max_tokens=512,
+        max_num_batched_tokens=256,
+        max_num_seqs=8,
+        speculative_tokens=3,
+    ) == 64
+    assert infer_piecewise_capture_limit(
+        requested_max_tokens=512,
+        max_num_batched_tokens=8,
+        max_num_seqs=2,
+        speculative_tokens=2,
+    ) == 8
+    assert infer_piecewise_capture_limit(
+        requested_max_tokens=19,
+        max_num_batched_tokens=256,
+        max_num_seqs=512,
+        speculative_tokens=0,
+    ) == 19
 
 
 def test_enforce_eager_overrides_explicit_graph_mode(tmp_path, monkeypatch):
