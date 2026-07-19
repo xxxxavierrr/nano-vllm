@@ -1,0 +1,558 @@
+{
+  "model": "/root/autodl-tmp/huggingface/Qwen3.6-27b-gptq-int4",
+  "mtp_model": "/root/autodl-tmp/huggingface/Qwen3.6-27B-mtp",
+  "workload": {
+    "input_len": 128,
+    "output_len": 32,
+    "num_requests": 16,
+    "concurrency": [
+      4,
+      6,
+      8
+    ],
+    "max_num_batched_tokens": 256,
+    "closed_loop": true,
+    "greedy": true,
+    "ignore_eos": true,
+    "prompt_source": "built-in natural prompts"
+  },
+  "methodology": {
+    "warmup_requests": "2 * concurrency",
+    "warmup_output_len": 16,
+    "timed_repeats": 1,
+    "winner_metric": "output_token_per_s",
+    "tokenization_in_timing": false,
+    "engine_reused_across_concurrency": true,
+    "ttft_slo_ms": null,
+    "tpot_slo_ms": null,
+    "require_exact_output": false
+  },
+  "cases": [
+    {
+      "k": 2,
+      "init_seconds": 24.098069164901972,
+      "requested_max_num_seqs": 8,
+      "active_request_capacity": 8,
+      "delta_state_capacity": 8,
+      "delta_state_bytes_per_request": 309854208,
+      "kv_cache_blocks": 18,
+      "kv_cache_token_capacity": 4608,
+      "measurements": [
+        {
+          "k": 2,
+          "concurrency": 4,
+          "repeats": 1,
+          "requests": 16,
+          "output_tokens": 512,
+          "duration_s": [
+            13.655482683330774
+          ],
+          "request_per_s": 1.1716905488468141,
+          "output_token_per_s": 37.49409756309805,
+          "goodput_request_per_s": null,
+          "latency_ms": {
+            "ttft": {
+              "mean": 357.2752820327878,
+              "p50": 296.21671885252,
+              "p95": 600.0944022089243,
+              "p99": 625.3826577216387,
+              "max": 631.7047215998173
+            },
+            "tpot": {
+              "mean": 96.60941422466308,
+              "p50": 99.12739333606535,
+              "p95": 118.95765006662377,
+              "p99": 120.42239755992928,
+              "max": 120.78858443325565
+            },
+            "e2e": {
+              "mean": 3352.1671229973435,
+              "p50": 3303.6280926316977,
+              "p95": 4041.8260265141726,
+              "p99": 4041.833746805787,
+              "max": 4041.8356768786907
+            }
+          },
+          "steps": 57,
+          "max_active_requests": 4,
+          "preemptions": 0,
+          "output_hashes": [
+            "b9eec97f341bcf050e51383ec1ae6b29488cb6e0a67f8427ce730483ce6d8f64"
+          ],
+          "repeat_outputs_match": true,
+          "speculative": {
+            "drafted": 432,
+            "proposed": 400,
+            "accepted": 316,
+            "rejected": 84,
+            "bonus": 146,
+            "verification_rounds": 200,
+            "accepted_position_1": 170,
+            "accepted_position_2": 146,
+            "accepted_position_3": 0,
+            "acceptance_rate": 0.79,
+            "average_accepted_length": 1.58,
+            "position_acceptance_rate": {
+              "1": 0.85,
+              "2": 0.73,
+              "3": 0.0
+            }
+          }
+        },
+        {
+          "k": 2,
+          "concurrency": 6,
+          "repeats": 1,
+          "requests": 16,
+          "output_tokens": 512,
+          "duration_s": [
+            22.64334663003683
+          ],
+          "request_per_s": 0.7066093303882781,
+          "output_token_per_s": 22.6114985724249,
+          "goodput_request_per_s": null,
+          "latency_ms": {
+            "ttft": {
+              "mean": 1247.6400225423276,
+              "p50": 593.8236322253942,
+              "p95": 4699.113558977842,
+              "p99": 4722.151150554419,
+              "max": 4727.910548448563
+            },
+            "tpot": {
+              "mean": 214.48545428293366,
+              "p50": 213.226972628505,
+              "p95": 374.3530090357507,
+              "p99": 374.4737111092095,
+              "max": 374.5038866275741
+            },
+            "e2e": {
+              "mean": 7896.689105313271,
+              "p50": 7204.0401846170425,
+              "p95": 13226.456943899393,
+              "p99": 15671.301708370445,
+              "max": 16282.51289948821
+            }
+          },
+          "steps": 42,
+          "max_active_requests": 6,
+          "preemptions": 0,
+          "output_hashes": [
+            "3de0b10c26d50ed0c6d6a6d37e0d7da65961eea7a4e91cfc52cc4013ae5de6d6"
+          ],
+          "repeat_outputs_match": true,
+          "speculative": {
+            "drafted": 424,
+            "proposed": 392,
+            "accepted": 318,
+            "rejected": 74,
+            "bonus": 147,
+            "verification_rounds": 196,
+            "accepted_position_1": 171,
+            "accepted_position_2": 147,
+            "accepted_position_3": 0,
+            "acceptance_rate": 0.8112244897959183,
+            "average_accepted_length": 1.6224489795918366,
+            "position_acceptance_rate": {
+              "1": 0.8724489795918368,
+              "2": 0.75,
+              "3": 0.0
+            }
+          }
+        },
+        {
+          "k": 2,
+          "concurrency": 8,
+          "repeats": 1,
+          "requests": 16,
+          "output_tokens": 512,
+          "duration_s": [
+            16.667560808360577
+          ],
+          "request_per_s": 0.9599485002013178,
+          "output_token_per_s": 30.71835200644217,
+          "goodput_request_per_s": null,
+          "latency_ms": {
+            "ttft": {
+              "mean": 1380.5358461104333,
+              "p50": 637.3700965195894,
+              "p95": 5012.886417098343,
+              "p99": 5060.370173491538,
+              "max": 5072.241112589836
+            },
+            "tpot": {
+              "mean": 219.29903926267738,
+              "p50": 238.07993603329504,
+              "p95": 395.28240341572996,
+              "p99": 395.4772447025584,
+              "max": 395.5259550242655
+            },
+            "e2e": {
+              "mean": 8178.8060632534325,
+              "p50": 8333.742650225759,
+              "p95": 12561.268854886293,
+              "p99": 12567.105520516634,
+              "max": 12568.56468692422
+            }
+          },
+          "steps": 30,
+          "max_active_requests": 8,
+          "preemptions": 0,
+          "output_hashes": [
+            "09b1209c87ded53ddf9b178bd80930934759c002ab5ab3ef1aefe8b958eb7f25"
+          ],
+          "repeat_outputs_match": true,
+          "speculative": {
+            "drafted": 420,
+            "proposed": 388,
+            "accepted": 322,
+            "rejected": 66,
+            "bonus": 152,
+            "verification_rounds": 194,
+            "accepted_position_1": 170,
+            "accepted_position_2": 152,
+            "accepted_position_3": 0,
+            "acceptance_rate": 0.8298969072164949,
+            "average_accepted_length": 1.6597938144329898,
+            "position_acceptance_rate": {
+              "1": 0.8762886597938144,
+              "2": 0.7835051546391752,
+              "3": 0.0
+            }
+          }
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "k": 3,
+      "init_seconds": 22.603910718113184,
+      "requested_max_num_seqs": 8,
+      "active_request_capacity": 8,
+      "delta_state_capacity": 8,
+      "delta_state_bytes_per_request": 309854208,
+      "kv_cache_blocks": 31,
+      "kv_cache_token_capacity": 7936,
+      "measurements": [
+        {
+          "k": 3,
+          "concurrency": 4,
+          "repeats": 1,
+          "requests": 16,
+          "output_tokens": 512,
+          "duration_s": [
+            12.442934546619654
+          ],
+          "request_per_s": 1.285870301740572,
+          "output_token_per_s": 41.1478496556983,
+          "goodput_request_per_s": null,
+          "latency_ms": {
+            "ttft": {
+              "mean": 323.9987939596176,
+              "p50": 293.68228651583195,
+              "p95": 610.5944877490401,
+              "p99": 628.0132783576846,
+              "max": 632.3679760098457
+            },
+            "tpot": {
+              "mean": 87.6263533268244,
+              "p50": 86.84967728632111,
+              "p95": 106.76367286472552,
+              "p99": 123.6574309367326,
+              "max": 127.88087045473438
+            },
+            "e2e": {
+              "mean": 3040.415747091174,
+              "p50": 2960.5512972921133,
+              "p95": 3869.4347562268376,
+              "p99": 4218.88426784426,
+              "max": 4306.246645748615
+            }
+          },
+          "steps": 48,
+          "max_active_requests": 4,
+          "preemptions": 0,
+          "output_hashes": [
+            "bc6206231c2742a8ba7c61882b7f9803f4ee60034f9b5acb8f4ca5611e9c3765"
+          ],
+          "repeat_outputs_match": true,
+          "speculative": {
+            "drafted": 549,
+            "proposed": 501,
+            "accepted": 359,
+            "rejected": 142,
+            "bonus": 105,
+            "verification_rounds": 167,
+            "accepted_position_1": 134,
+            "accepted_position_2": 120,
+            "accepted_position_3": 105,
+            "acceptance_rate": 0.716566866267465,
+            "average_accepted_length": 2.1497005988023954,
+            "position_acceptance_rate": {
+              "1": 0.8023952095808383,
+              "2": 0.718562874251497,
+              "3": 0.6287425149700598
+            }
+          }
+        },
+        {
+          "k": 3,
+          "concurrency": 6,
+          "repeats": 1,
+          "requests": 16,
+          "output_tokens": 512,
+          "duration_s": [
+            10.027225844562054
+          ],
+          "request_per_s": 1.5956556926138339,
+          "output_token_per_s": 51.060982163642684,
+          "goodput_request_per_s": null,
+          "latency_ms": {
+            "ttft": {
+              "mean": 418.7380422372371,
+              "p50": 310.04938669502735,
+              "p95": 733.1384168937802,
+              "p99": 920.2171066775917,
+              "max": 966.9867791235447
+            },
+            "tpot": {
+              "mean": 98.03954172398775,
+              "p50": 96.97065346183317,
+              "p95": 126.75755074427974,
+              "p99": 127.91710950193865,
+              "max": 128.2069991913534
+            },
+            "e2e": {
+              "mean": 3457.9638356808573,
+              "p50": 3335.0852373987436,
+              "p95": 4318.243877962232,
+              "p99": 4318.250140920281,
+              "max": 4318.251706659794
+            }
+          },
+          "steps": 36,
+          "max_active_requests": 6,
+          "preemptions": 0,
+          "output_hashes": [
+            "5bab000586d21aacb0bc6a2878f0a620314d25061f7bf1d10a074d32a63621ec"
+          ],
+          "repeat_outputs_match": true,
+          "speculative": {
+            "drafted": 552,
+            "proposed": 504,
+            "accepted": 356,
+            "rejected": 148,
+            "bonus": 102,
+            "verification_rounds": 168,
+            "accepted_position_1": 134,
+            "accepted_position_2": 120,
+            "accepted_position_3": 102,
+            "acceptance_rate": 0.7063492063492064,
+            "average_accepted_length": 2.119047619047619,
+            "position_acceptance_rate": {
+              "1": 0.7976190476190477,
+              "2": 0.7142857142857143,
+              "3": 0.6071428571428571
+            }
+          }
+        },
+        {
+          "k": 3,
+          "concurrency": 8,
+          "repeats": 1,
+          "requests": 16,
+          "output_tokens": 512,
+          "duration_s": [
+            29.07794066518545
+          ],
+          "request_per_s": 0.5502452936482033,
+          "output_token_per_s": 17.607849396742505,
+          "goodput_request_per_s": null,
+          "latency_ms": {
+            "ttft": {
+              "mean": 2412.876326125115,
+              "p50": 657.8065622597933,
+              "p95": 7939.978515729308,
+              "p99": 15692.9517339915,
+              "max": 17631.195038557053
+            },
+            "tpot": {
+              "mean": 380.9995536331929,
+              "p50": 250.73643473367537,
+              "p95": 652.6499693732587,
+              "p99": 654.4547090667389,
+              "max": 654.905893990109
+            },
+            "e2e": {
+              "mean": 14223.862488754094,
+              "p50": 14293.905809521675,
+              "p95": 21882.64840655029,
+              "p99": 24356.413468346,
+              "max": 24974.854733794928
+            }
+          },
+          "steps": 27,
+          "max_active_requests": 8,
+          "preemptions": 0,
+          "output_hashes": [
+            "f026b60bef01085a71d3395ced4cd583ecfbf98783e7134c2cd64750f69c5c45"
+          ],
+          "repeat_outputs_match": true,
+          "speculative": {
+            "drafted": 537,
+            "proposed": 489,
+            "accepted": 358,
+            "rejected": 131,
+            "bonus": 105,
+            "verification_rounds": 163,
+            "accepted_position_1": 132,
+            "accepted_position_2": 121,
+            "accepted_position_3": 105,
+            "acceptance_rate": 0.7321063394683026,
+            "average_accepted_length": 2.196319018404908,
+            "position_acceptance_rate": {
+              "1": 0.8098159509202454,
+              "2": 0.7423312883435583,
+              "3": 0.6441717791411042
+            }
+          }
+        }
+      ],
+      "skipped": []
+    }
+  ],
+  "winner_by_concurrency": {
+    "4": {
+      "winner_k": 3,
+      "metric": "output_token_per_s",
+      "metric_value": 41.1478496556983,
+      "mismatched_k_disqualified": [],
+      "exact_output_match_across_k": false,
+      "output_comparison_by_k": {
+        "2": {
+          "exact_match": true,
+          "exact_request_rate": 1.0,
+          "positionwise_token_agreement": 1.0,
+          "first_divergence": null
+        },
+        "3": {
+          "exact_match": false,
+          "exact_request_rate": 0.1875,
+          "positionwise_token_agreement": 0.7890625,
+          "first_divergence": {
+            "request_index": 3,
+            "token_index": 3,
+            "expected_token": 271,
+            "actual_token": 2361,
+            "expected_context": [
+              13,
+              38256,
+              264,
+              271,
+              248068,
+              198,
+              8160
+            ],
+            "actual_context": [
+              13,
+              38256,
+              264,
+              2361,
+              22825,
+              4087,
+              11
+            ]
+          }
+        }
+      }
+    },
+    "6": {
+      "winner_k": 3,
+      "metric": "output_token_per_s",
+      "metric_value": 51.060982163642684,
+      "mismatched_k_disqualified": [],
+      "exact_output_match_across_k": false,
+      "output_comparison_by_k": {
+        "2": {
+          "exact_match": true,
+          "exact_request_rate": 1.0,
+          "positionwise_token_agreement": 1.0,
+          "first_divergence": null
+        },
+        "3": {
+          "exact_match": false,
+          "exact_request_rate": 0.125,
+          "positionwise_token_agreement": 0.8541666666666666,
+          "first_divergence": {
+            "request_index": 2,
+            "token_index": 18,
+            "expected_token": 5439,
+            "actual_token": 68534,
+            "expected_context": [
+              332,
+              271,
+              332,
+              5439,
+              367,
+              1255,
+              64700
+            ],
+            "actual_context": [
+              332,
+              271,
+              332,
+              68534,
+              7185,
+              332,
+              31637
+            ]
+          }
+        }
+      }
+    },
+    "8": {
+      "winner_k": 2,
+      "metric": "output_token_per_s",
+      "metric_value": 30.71835200644217,
+      "mismatched_k_disqualified": [],
+      "exact_output_match_across_k": false,
+      "output_comparison_by_k": {
+        "2": {
+          "exact_match": true,
+          "exact_request_rate": 1.0,
+          "positionwise_token_agreement": 1.0,
+          "first_divergence": null
+        },
+        "3": {
+          "exact_match": false,
+          "exact_request_rate": 0.125,
+          "positionwise_token_agreement": 0.7395833333333334,
+          "first_divergence": {
+            "request_index": 2,
+            "token_index": 5,
+            "expected_token": 198,
+            "actual_token": 271,
+            "expected_context": [
+              264,
+              271,
+              248068,
+              198,
+              8160,
+              579,
+              264
+            ],
+            "actual_context": [
+              264,
+              271,
+              248068,
+              271,
+              248069,
+              271,
+              332
+            ]
+          }
+        }
+      }
+    }
+  }
+}

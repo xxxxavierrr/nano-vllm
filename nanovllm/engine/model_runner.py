@@ -6,6 +6,7 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
+from nanovllm.engine.capacity import plan_delta_state_capacity
 from nanovllm.config import Config
 from nanovllm.engine.cudagraph import (
     BatchDescriptor,
@@ -384,26 +385,42 @@ class ModelRunner:
             total * config.gpu_memory_utilization - used - peak + current
         )
         reserved_delta_bytes = 0
+        delta_state_bytes_per_sequence = 0
+        guaranteed_kv_blocks_per_sequence = 0
+        minimum_delta_kv_blocks = 0
         if self.has_delta_state:
             state_bytes = self.model.delta_state_bytes(hf_config.dtype)
             state_copies = 2 if self.mtp_model is not None else 1
-            per_sequence_state_bytes = state_bytes * state_copies
-            total_capacity = (
-                available_bytes - block_bytes
-            ) // per_sequence_state_bytes
-            if total_capacity < 1:
+            capacity_plan = plan_delta_state_capacity(
+                available_bytes=available_bytes,
+                state_bytes=state_bytes,
+                state_copies=state_copies,
+                block_bytes=block_bytes,
+                block_size=self.block_size,
+                max_model_len=config.max_model_len,
+                max_num_seqs=config.max_num_seqs,
+                speculative_tokens=(
+                    config.num_speculative_tokens
+                    if self.mtp_model is not None
+                    else 0
+                ),
+            )
+            if capacity_plan.capacity < 1:
                 raise RuntimeError(
-                    "insufficient GPU memory for speculative DeltaNet state"
+                    "insufficient GPU memory for DeltaNet state and the "
+                    "configured per-sequence KV capacity"
                 )
-            half_capacity = max(
-                1, available_bytes // 2 // per_sequence_state_bytes
-            )
-            self.delta_state_capacity = min(
-                config.max_num_seqs, total_capacity, half_capacity
-            )
+            self.delta_state_capacity = capacity_plan.capacity
             config.max_num_seqs = self.delta_state_capacity
-            reserved_delta_bytes = (
-                self.delta_state_capacity * per_sequence_state_bytes
+            delta_state_bytes_per_sequence = (
+                capacity_plan.state_bytes_per_sequence
+            )
+            guaranteed_kv_blocks_per_sequence = (
+                capacity_plan.kv_blocks_per_sequence
+            )
+            minimum_delta_kv_blocks = capacity_plan.minimum_kv_blocks
+            reserved_delta_bytes = self.delta_state_capacity * (
+                delta_state_bytes_per_sequence
             )
             self.delta_states.clear()
             self.delta_state_slab = self.model.create_delta_state_slab(
@@ -428,6 +445,12 @@ class ModelRunner:
         config.num_kvcache_blocks = cache_bytes // block_bytes
         if config.num_kvcache_blocks <= 0:
             raise RuntimeError("insufficient GPU memory for one KV cache block")
+        if config.num_kvcache_blocks < minimum_delta_kv_blocks:
+            raise RuntimeError(
+                "KV cache allocation fell below the per-sequence capacity "
+                f"guarantee: {config.num_kvcache_blocks} blocks available, "
+                f"{minimum_delta_kv_blocks} required"
+            )
         self.kv_cache = torch.empty(
             2,
             num_attention_layers,
@@ -487,6 +510,11 @@ class ModelRunner:
                 f"scale_bytes_per_block={scale_bytes}, "
                 f"mtp_bytes_per_block={mtp_payload_bytes}, "
                 f"blocks={config.num_kvcache_blocks}, "
+                f"delta_state_slots={self.delta_state_capacity or 0}, "
+                f"delta_state_bytes_per_sequence="
+                f"{delta_state_bytes_per_sequence}, "
+                f"guaranteed_kv_blocks_per_sequence="
+                f"{guaranteed_kv_blocks_per_sequence}, "
                 f"token_capacity={config.num_kvcache_blocks * self.block_size}"
             )
 
