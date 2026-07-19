@@ -16,7 +16,7 @@ from nanovllm.engine.cudagraph import (
     make_piecewise_capture_sizes,
 )
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.speculative import greedy_accept_k1
+from nanovllm.engine.speculative import greedy_accept
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.deltanet_chunk import (
@@ -36,7 +36,7 @@ from nanovllm.utils.mtp_loader import load_mtp_model
 class SpeculativeBatchOutput:
     token_ids: list[list[int]]
     accepted_counts: list[int]
-    next_draft_token_ids: list[int | None]
+    next_draft_token_ids: list[list[int] | None]
 
 
 class ModelRunner:
@@ -126,6 +126,9 @@ class ModelRunner:
             "accepted": 0,
             "rejected": 0,
             "bonus": 0,
+            "verification_rounds": 0,
+            "accepted_position_1": 0,
+            "accepted_position_2": 0,
         }
         self.piecewise_model = None
         if self.cudagraph_mode.uses_piecewise:
@@ -791,33 +794,41 @@ class ModelRunner:
         )
 
     @torch.inference_mode()
-    def _replay_rejected_frontiers(self, seqs: list[Sequence]):
-        if not seqs:
+    def _replay_rejected_prefixes(
+        self,
+        rejected: list[tuple[Sequence, int]],
+    ):
+        if not rejected:
             return
         saved = [
-            (seq, seq.num_scheduled_tokens, list(seq.draft_token_ids))
-            for seq in seqs
+            (seq, seq.num_scheduled_tokens)
+            for seq, _ in rejected
         ]
+        replay_lengths = [1 + accepted for _, accepted in rejected]
         try:
-            for seq, _, _ in saved:
-                seq.num_scheduled_tokens = 1
-                seq.draft_token_ids.clear()
+            for (seq, accepted), replay_length in zip(
+                rejected, replay_lengths
+            ):
+                if not 0 <= accepted < len(seq.draft_token_ids):
+                    raise ValueError("invalid partial draft acceptance for replay")
+                seq.num_scheduled_tokens = replay_length
+            uniform_decode = all(length == 1 for length in replay_lengths)
             descriptor = BatchDescriptor(
-                num_tokens=len(seqs),
-                num_padded_tokens=len(seqs),
-                num_seqs=len(seqs),
-                uniform_decode=True,
+                num_tokens=sum(replay_lengths),
+                num_padded_tokens=sum(replay_lengths),
+                num_seqs=len(rejected),
+                uniform_decode=uniform_decode,
                 execution_mode=ExecutionMode.EAGER,
             )
+            seqs = [seq for seq, _ in rejected]
             input_ids, positions = self.prepare_inputs(seqs, descriptor)
             try:
                 self.run_model(input_ids, positions, descriptor)
             finally:
                 reset_context()
         finally:
-            for seq, scheduled, drafts in saved:
+            for seq, scheduled in saved:
                 seq.num_scheduled_tokens = scheduled
-                seq.draft_token_ids[:] = drafts
 
     def _mtp_slot_mapping(
         self,
@@ -852,9 +863,10 @@ class ModelRunner:
         target_hidden_states: torch.Tensor,
         token_groups: list[list[int]],
         accepted_counts: list[int],
-    ) -> list[int | None]:
+    ) -> list[list[int] | None]:
+        sampled_seqs = [seq for seq in seqs if seq.will_sample]
         if self.mtp_model is None:
-            return [None] * len([seq for seq in seqs if seq.will_sample])
+            return [None] * len(sampled_seqs)
 
         hidden_parts = []
         next_token_ids = []
@@ -864,7 +876,7 @@ class ModelRunner:
         slot_mapping = []
         context_lens = []
         logits_indices = []
-        sampled_mask = []
+        sampled_next_positions = []
         offset = 0
         group_index = 0
         use_kv_cache = all(bool(seq.block_table) for seq in seqs)
@@ -884,14 +896,12 @@ class ModelRunner:
                 target_inputs = seq.scheduled_token_ids()[:valid_inputs]
                 shifted_ids = target_inputs[1:] + [outputs[-1]]
                 group_index += 1
-                sampled_mask.append(True)
             else:
                 valid_inputs = scheduled
                 start = seq.num_cached_tokens
                 shifted_ids = seq.token_ids[
                     start + 1 : start + valid_inputs + 1
                 ]
-                sampled_mask.append(False)
             if len(shifted_ids) != valid_inputs:
                 raise ValueError(
                     f"cannot build shifted MTP inputs for sequence {seq.seq_id}"
@@ -907,6 +917,7 @@ class ModelRunner:
             context_lens.append(end)
             if seq.will_sample:
                 logits_indices.append(cu_seqlens_q[-1] - 1)
+                sampled_next_positions.append(end)
             if use_kv_cache:
                 slot_mapping.extend(self._mtp_slot_mapping(seq, start, end))
 
@@ -939,15 +950,17 @@ class ModelRunner:
             self.prepare_block_tables(seqs) if use_kv_cache else None
         )
         uniform_decode = use_kv_cache and all(
-            end - start == 1
-            for start, end in zip(cu_seqlens_q[:-1], cu_seqlens_q[1:])
+            query_end - query_start == 1
+            for query_start, query_end in zip(
+                cu_seqlens_q[:-1], cu_seqlens_q[1:]
+            )
         )
         set_context(
             cu_seqlens_q=cu_q,
             cu_seqlens_k=cu_k,
             max_seqlen_q=max(
-                end - start
-                for start, end in zip(
+                query_end - query_start
+                for query_start, query_end in zip(
                     cu_seqlens_q[:-1], cu_seqlens_q[1:]
                 )
             ),
@@ -970,11 +983,114 @@ class ModelRunner:
             )
             if not logits_indices:
                 return []
+            sampled_hidden = mtp_hidden.index_select(
+                0, logits_indices_tensor
+            )
             logits = self.model.compute_logits(mtp_hidden)
-            proposal_ids = logits.argmax(dim=-1).tolist()
-            return proposal_ids
+            proposal_ids = logits.argmax(dim=-1)
         finally:
             reset_context()
+
+        draft_chains = [
+            [token_id] for token_id in proposal_ids.tolist()
+        ]
+        for _ in range(1, self.config.num_speculative_tokens):
+            batch_size = len(sampled_seqs)
+            recursive_positions = torch.tensor(
+                sampled_next_positions,
+                dtype=torch.long,
+                pin_memory=True,
+            ).cuda(non_blocking=True)
+            recursive_input_ids = proposal_ids.to(dtype=torch.long)
+            recursive_cu_q = torch.arange(
+                batch_size + 1, dtype=torch.int32, device="cuda"
+            )
+            if use_kv_cache:
+                recursive_cu_k_host = [0]
+                recursive_slots = []
+                recursive_context_lens = []
+                for seq, position in zip(
+                    sampled_seqs, sampled_next_positions
+                ):
+                    recursive_cu_k_host.append(
+                        recursive_cu_k_host[-1] + position + 1
+                    )
+                    recursive_context_lens.append(position + 1)
+                    recursive_slots.extend(
+                        self._mtp_slot_mapping(
+                            seq, position, position + 1
+                        )
+                    )
+                recursive_cu_k = torch.tensor(
+                    recursive_cu_k_host,
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
+                recursive_slot_mapping = torch.tensor(
+                    recursive_slots,
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
+                recursive_context = torch.tensor(
+                    recursive_context_lens,
+                    dtype=torch.int32,
+                    pin_memory=True,
+                ).cuda(non_blocking=True)
+                recursive_blocks = self.prepare_block_tables(sampled_seqs)
+            else:
+                recursive_cu_k = recursive_cu_q
+                recursive_slot_mapping = torch.empty(
+                    0, dtype=torch.int32, device="cuda"
+                )
+                recursive_context = torch.ones(
+                    batch_size, dtype=torch.int32, device="cuda"
+                )
+                recursive_blocks = None
+            recursive_logits_indices = torch.arange(
+                batch_size, dtype=torch.long, device="cuda"
+            )
+            set_context(
+                cu_seqlens_q=recursive_cu_q,
+                cu_seqlens_k=recursive_cu_k,
+                max_seqlen_q=1,
+                max_seqlen_k=(
+                    max(sampled_next_positions) + 1
+                    if use_kv_cache
+                    else 1
+                ),
+                slot_mapping=recursive_slot_mapping,
+                block_tables=recursive_blocks,
+                logits_indices=recursive_logits_indices,
+                context_lens=recursive_context,
+                use_kv_cache=use_kv_cache,
+                is_uniform_decode=use_kv_cache,
+                num_actual_tokens=batch_size,
+                num_padded_tokens=batch_size,
+            )
+            try:
+                recursive_embeddings = (
+                    self.model.model.language_model.embed_tokens(
+                        recursive_input_ids
+                    )
+                )
+                sampled_hidden = self.mtp_model(
+                    recursive_positions,
+                    sampled_hidden,
+                    recursive_embeddings,
+                )
+                recursive_logits = self.model.compute_logits(sampled_hidden)
+                proposal_ids = recursive_logits.argmax(dim=-1)
+            finally:
+                reset_context()
+            for chain, token_id in zip(
+                draft_chains, proposal_ids.tolist()
+            ):
+                chain.append(token_id)
+            sampled_next_positions = [
+                position + 1 for position in sampled_next_positions
+            ]
+
+        return draft_chains
 
     @torch.inference_mode()
     def run_model(
@@ -1025,6 +1141,9 @@ class ModelRunner:
             "accepted": 0,
             "rejected": 0,
             "bonus": 0,
+            "verification_rounds": 0,
+            "accepted_position_1": 0,
+            "accepted_position_2": 0,
         }
         sampled_seqs = [seq for seq in seqs if seq.will_sample]
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs)
@@ -1040,8 +1159,8 @@ class ModelRunner:
         use_speculative = self.mtp_model is not None
         if use_speculative and any(seq.temperature != 0 for seq in sampled_seqs):
             raise ValueError(
-                "MTP k=1 correctness milestone currently supports greedy "
-                "decoding only (temperature=0)"
+                "MTP v1 currently supports greedy decoding only "
+                "(temperature=0)"
             )
         has_verification = use_speculative and any(
             seq.is_speculative for seq in sampled_seqs
@@ -1077,29 +1196,37 @@ class ModelRunner:
 
             token_groups: list[list[int]] = []
             accepted_counts: list[int] = []
-            rejected_seqs: list[Sequence] = []
+            rejected_seqs: list[tuple[Sequence, int]] = []
             committed_working_seqs: list[Sequence] = [
                 seq for seq in seqs if not seq.will_sample
             ]
             logit_offset = 0
             for seq in sampled_seqs:
                 if seq.is_speculative:
-                    if len(seq.draft_token_ids) != 1:
+                    num_drafts = len(seq.draft_token_ids)
+                    if num_drafts != self.config.num_speculative_tokens:
                         raise ValueError(
-                            "MTP k=1 expects exactly one draft token"
+                            "MTP draft chain length does not match "
+                            "num_speculative_tokens"
                         )
-                    verification_logits = logits[logit_offset : logit_offset + 2]
-                    logit_offset += 2
-                    target_tokens = verification_logits.argmax(dim=-1).tolist()
-                    outputs, accepted = greedy_accept_k1(
-                        target_tokens, seq.draft_token_ids[0]
+                    num_verification_logits = num_drafts + 1
+                    verification_logits = logits[
+                        logit_offset :
+                        logit_offset + num_verification_logits
+                    ]
+                    logit_offset += num_verification_logits
+                    target_tokens = (
+                        verification_logits.argmax(dim=-1).tolist()
+                    )
+                    outputs, accepted = greedy_accept(
+                        target_tokens, seq.draft_token_ids
                     )
                     token_groups.append(outputs)
                     accepted_counts.append(accepted)
-                    if accepted:
+                    if accepted == num_drafts:
                         committed_working_seqs.append(seq)
                     else:
-                        rejected_seqs.append(seq)
+                        rejected_seqs.append((seq, accepted))
                 else:
                     token_groups.append(
                         [int(logits[logit_offset].argmax().item())]
@@ -1113,7 +1240,7 @@ class ModelRunner:
 
             if has_verification:
                 self._commit_working_delta(committed_working_seqs)
-                self._replay_rejected_frontiers(rejected_seqs)
+                self._replay_rejected_prefixes(rejected_seqs)
 
             proposals = self._run_mtp_proposal(
                 seqs,
@@ -1128,7 +1255,9 @@ class ModelRunner:
             )
             accepted = sum(accepted_counts)
             self.last_speculative_stats = {
-                "drafted": len(proposals),
+                "drafted": sum(
+                    len(chain) for chain in proposals if chain is not None
+                ),
                 "proposed": proposed,
                 "accepted": accepted,
                 "rejected": proposed - accepted,
@@ -1137,6 +1266,21 @@ class ModelRunner:
                         seq.is_speculative
                         and accepted_count == len(seq.draft_token_ids)
                     )
+                    for seq, accepted_count in zip(
+                        sampled_seqs, accepted_counts
+                    )
+                ),
+                "verification_rounds": sum(
+                    int(seq.is_speculative) for seq in sampled_seqs
+                ),
+                "accepted_position_1": sum(
+                    int(seq.is_speculative and accepted_count >= 1)
+                    for seq, accepted_count in zip(
+                        sampled_seqs, accepted_counts
+                    )
+                ),
+                "accepted_position_2": sum(
+                    int(seq.is_speculative and accepted_count >= 2)
                     for seq, accepted_count in zip(
                         sampled_seqs, accepted_counts
                     )

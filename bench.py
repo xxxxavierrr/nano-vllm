@@ -101,7 +101,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument(
         "--speculative-method", choices=["none", "mtp"], default="none"
     )
-    parser.add_argument("--num-speculative-tokens", type=int, default=1)
+    parser.add_argument("--num-speculative-tokens", type=int, default=2)
     parser.add_argument("--mtp-model")
     parser.add_argument("--num-requests", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=256)
@@ -155,8 +155,8 @@ def parse_args(argv: list[str] | None = None):
     if args.warmup_num_requests <= 0:
         parser.error("--warmup-num-requests must be positive")
     if args.speculative_method == "mtp":
-        if args.num_speculative_tokens != 1:
-            parser.error("current MTP milestone requires --num-speculative-tokens 1")
+        if args.num_speculative_tokens not in (1, 2):
+            parser.error("--num-speculative-tokens must be 1 or 2")
         if args.temperature != 0:
             parser.error("current MTP milestone requires --temperature 0")
         if args.mtp_model is not None and not Path(args.mtp_model).is_dir():
@@ -231,6 +231,9 @@ def main(argv: list[str] | None = None):
         "accepted_tokens": 0,
         "rejected_tokens": 0,
         "bonus_tokens": 0,
+        "verification_rounds": 0,
+        "accepted_position_1": 0,
+        "accepted_position_2": 0,
     }
     execution_mode_stats = {
         mode.value: {"steps": 0, "seconds": 0.0, "tokens": 0}
@@ -460,8 +463,22 @@ def main(argv: list[str] | None = None):
             ),
             "average_accepted_length": (
                 speculative_stats["accepted_tokens"]
-                / max(1, speculative_stats["proposed_tokens"])
+                / max(1, speculative_stats["verification_rounds"])
             ),
+            "position_acceptance_rate": {
+                "1": (
+                    speculative_stats["accepted_position_1"]
+                    / speculative_stats["verification_rounds"]
+                    if speculative_stats["verification_rounds"]
+                    else 0.0
+                ),
+                "2": (
+                    speculative_stats["accepted_position_2"]
+                    / speculative_stats["verification_rounds"]
+                    if speculative_stats["verification_rounds"]
+                    else 0.0
+                ),
+            },
         },
         "scheduler": {
             "preemptions": llm.scheduler.num_preemptions,

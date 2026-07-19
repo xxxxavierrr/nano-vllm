@@ -11,7 +11,7 @@ from nanovllm import LLM, SamplingParams
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Compare Qwen3.6 greedy baseline with native MTP k=1."
+        description="Compare Qwen3.6 greedy baseline with native MTP."
     )
     parser.add_argument(
         "--model",
@@ -27,6 +27,9 @@ def parse_args():
     )
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--warmup-tokens", type=int, default=2)
+    parser.add_argument(
+        "--num-speculative-tokens", type=int, choices=[1, 2], default=2
+    )
     parser.add_argument("--max-model-len", type=int, default=256)
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
@@ -49,7 +52,7 @@ def run_case(args, *, use_mtp: bool):
         args.model,
         speculative_method="mtp" if use_mtp else "none",
         mtp_model=args.mtp_model if use_mtp else None,
-        num_speculative_tokens=1,
+        num_speculative_tokens=args.num_speculative_tokens,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=1,
@@ -69,6 +72,9 @@ def run_case(args, *, use_mtp: bool):
         "accepted": 0,
         "rejected": 0,
         "bonus": 0,
+        "verification_rounds": 0,
+        "accepted_position_1": 0,
+        "accepted_position_2": 0,
     }
     try:
         llm.generate(
@@ -106,6 +112,15 @@ def run_case(args, *, use_mtp: bool):
             speculative["accepted"] += stats.speculative_accepted_tokens
             speculative["rejected"] += stats.speculative_rejected_tokens
             speculative["bonus"] += stats.speculative_bonus_tokens
+            speculative["verification_rounds"] += (
+                stats.speculative_verification_rounds
+            )
+            speculative["accepted_position_1"] += (
+                stats.speculative_accepted_position_1
+            )
+            speculative["accepted_position_2"] += (
+                stats.speculative_accepted_position_2
+            )
         generate_seconds = perf_counter() - started
         return {
             "init_seconds": init_seconds,
@@ -123,6 +138,26 @@ def run_case(args, *, use_mtp: bool):
                     if speculative["proposed"]
                     else 0.0
                 ),
+                "average_accepted_length": (
+                    speculative["accepted"]
+                    / speculative["verification_rounds"]
+                    if speculative["verification_rounds"]
+                    else 0.0
+                ),
+                "position_acceptance_rate": {
+                    "1": (
+                        speculative["accepted_position_1"]
+                        / speculative["verification_rounds"]
+                        if speculative["verification_rounds"]
+                        else 0.0
+                    ),
+                    "2": (
+                        speculative["accepted_position_2"]
+                        / speculative["verification_rounds"]
+                        if speculative["verification_rounds"]
+                        else 0.0
+                    ),
+                },
             },
             "kv_cache": {
                 "bytes_per_block": llm.config.kvcache_block_bytes,
@@ -152,6 +187,7 @@ def main():
         "prompt": args.prompt,
         "max_tokens": args.max_tokens,
         "warmup_tokens": args.warmup_tokens,
+        "num_speculative_tokens": args.num_speculative_tokens,
         "exact_token_match": exact_match,
         "baseline": baseline,
         "mtp": mtp,

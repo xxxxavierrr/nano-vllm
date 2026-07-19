@@ -29,6 +29,14 @@ class Scheduler:
         self.eos = config.eos
         self.enable_prefix_cache = getattr(config, "enable_prefix_cache", True)
         self.block_size = config.kvcache_block_size
+        self.num_speculative_tokens = (
+            config.num_speculative_tokens
+            if getattr(config, "speculative_method", "none") == "mtp"
+            else 0
+        )
+        self.mtp_recursive_lookahead = max(
+            0, self.num_speculative_tokens - 1
+        )
         self.block_manager = BlockManager(
             config.num_kvcache_blocks,
             config.kvcache_block_size,
@@ -78,12 +86,17 @@ class Scheduler:
             if seq.is_speculative and token_budget < outstanding:
                 continue
             num_tokens = min(outstanding, token_budget)
-            if not was_prefill:
+            storage_tokens = num_tokens + (
+                self.mtp_recursive_lookahead
+                if num_tokens == outstanding
+                else 0
+            )
+            if not was_prefill or storage_tokens > num_tokens:
                 if not self._reserve_decode_slots(
-                    seq, protected, num_tokens
+                    seq, protected, storage_tokens
                 ):
                     continue
-                self.block_manager.may_append_tokens(seq, num_tokens)
+                self.block_manager.may_append_tokens(seq, storage_tokens)
             seq.num_scheduled_tokens = num_tokens
             scheduled_seqs.append(seq)
             protected.add(seq.seq_id)
@@ -111,6 +124,17 @@ class Scheduler:
             outstanding = seq.num_tokens - seq.num_cached_tokens
             assert outstanding > 0
             num_tokens = min(outstanding, token_budget)
+            storage_tokens = num_tokens + (
+                self.mtp_recursive_lookahead
+                if num_tokens == outstanding
+                else 0
+            )
+            if storage_tokens > num_tokens:
+                if not self._reserve_decode_slots(
+                    seq, protected, storage_tokens
+                ):
+                    break
+                self.block_manager.may_append_tokens(seq, storage_tokens)
             seq.num_scheduled_tokens = num_tokens
             scheduled_seqs.append(seq)
             protected.add(seq.seq_id)
@@ -179,7 +203,7 @@ class Scheduler:
         token_ids: list[int] | list[list[int]],
         *,
         accepted_counts: list[int] | None = None,
-        next_draft_token_ids: list[int | None] | None = None,
+        next_draft_token_ids: list[int | list[int] | None] | None = None,
     ):
         sampled = batch.sampled_sequences
         if len(token_ids) != len(sampled):
@@ -256,8 +280,10 @@ class Scheduler:
             if finished:
                 self.block_manager.deallocate(seq)
                 self.running.remove(seq)
-            elif next_draft is not None:
+            elif isinstance(next_draft, int):
                 seq.draft_token_ids.append(next_draft)
+            elif next_draft is not None:
+                seq.draft_token_ids.extend(next_draft)
 
             if original_scheduled < committed_inputs:
                 raise AssertionError("committed more target inputs than scheduled")

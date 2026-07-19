@@ -14,7 +14,7 @@ class Config:
     quantization: str | None = None
     kv_cache_dtype: str = "auto"
     speculative_method: str = "none"
-    num_speculative_tokens: int = 1
+    num_speculative_tokens: int = 2
     mtp_model: str | None = None
     max_num_batched_tokens: int = 16384
     max_num_seqs: int = 512
@@ -102,14 +102,15 @@ class Config:
                 raise ValueError("MTP v1 only supports Qwen3.5/3.6")
             if self.tensor_parallel_size != 1:
                 raise ValueError("Qwen3.5/3.6 MTP v1 only supports TP=1")
-            if self.num_speculative_tokens != 1:
+            if self.num_speculative_tokens not in (1, 2):
                 raise ValueError(
-                    "the current MTP correctness milestone supports exactly "
-                    "one speculative token"
+                    "MTP v1 supports one or two speculative tokens"
                 )
-            if self.max_num_batched_tokens < 2:
+            minimum_batch_tokens = 1 + self.num_speculative_tokens
+            if self.max_num_batched_tokens < minimum_batch_tokens:
                 raise ValueError(
-                    "MTP requires max_num_batched_tokens at least 2"
+                    "MTP requires max_num_batched_tokens at least "
+                    f"{minimum_batch_tokens}"
                 )
             if getattr(self.hf_config, "mtp_num_hidden_layers", 0) != 1:
                 raise ValueError("MTP v1 requires exactly one checkpoint MTP layer")

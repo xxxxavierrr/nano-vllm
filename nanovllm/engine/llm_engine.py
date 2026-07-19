@@ -32,6 +32,9 @@ class EngineStepStats:
     speculative_accepted_tokens: int = 0
     speculative_rejected_tokens: int = 0
     speculative_bonus_tokens: int = 0
+    speculative_verification_rounds: int = 0
+    speculative_accepted_position_1: int = 0
+    speculative_accepted_position_2: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -77,8 +80,7 @@ class LLMEngine:
             and sampling_params.temperature != 0
         ):
             raise ValueError(
-                "MTP k=1 correctness milestone currently supports "
-                "temperature=0 only"
+                "MTP v1 currently supports temperature=0 only"
             )
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
@@ -148,6 +150,15 @@ class LLMEngine:
             speculative_accepted_tokens=speculative["accepted"],
             speculative_rejected_tokens=speculative["rejected"],
             speculative_bonus_tokens=speculative["bonus"],
+            speculative_verification_rounds=speculative[
+                "verification_rounds"
+            ],
+            speculative_accepted_position_1=speculative[
+                "accepted_position_1"
+            ],
+            speculative_accepted_position_2=speculative[
+                "accepted_position_2"
+            ],
         )
 
     def is_finished(self):
