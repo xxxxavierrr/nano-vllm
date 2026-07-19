@@ -176,3 +176,64 @@ def test_k2_prefill_reserves_recursive_mtp_boundary_slot():
     batch = scheduler.schedule()
     assert batch.sampled_sequences == [seq]
     assert len(seq.block_table) == 2
+
+
+def make_k3_scheduler(block_size: int = 4) -> Scheduler:
+    Sequence.block_size = block_size
+    return Scheduler(
+        SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=12,
+            eos=99,
+            enable_prefix_cache=False,
+            kvcache_block_size=block_size,
+            num_kvcache_blocks=16,
+            speculative_method="mtp",
+            num_speculative_tokens=3,
+        )
+    )
+
+
+def test_greedy_accept_k3_covers_every_prefix_length():
+    drafts = [4, 5, 6]
+    assert greedy_accept([9, 5, 6, 7], drafts) == ([9], 0)
+    assert greedy_accept([4, 9, 6, 7], drafts) == ([4, 9], 1)
+    assert greedy_accept([4, 5, 9, 7], drafts) == ([4, 5, 9], 2)
+    assert greedy_accept([4, 5, 6, 7], drafts) == ([4, 5, 6, 7], 3)
+
+
+def test_k3_scheduler_commits_two_token_prefix_on_third_rejection():
+    scheduler = make_k3_scheduler()
+    seq = Sequence([1, 2], SamplingParams(temperature=0, max_tokens=16))
+    scheduler.add(seq)
+    scheduler.postprocess(
+        scheduler.schedule(),
+        [[3]],
+        accepted_counts=[0],
+        next_draft_token_ids=[[4, 5, 6]],
+    )
+    verify = scheduler.schedule()
+    assert verify.total_tokens == 4
+    assert seq.scheduled_token_ids() == [3, 4, 5, 6]
+    scheduler.postprocess(
+        verify,
+        [[4, 5, 9]],
+        accepted_counts=[2],
+        next_draft_token_ids=[[10, 11, 12]],
+    )
+    assert seq.token_ids == [1, 2, 3, 4, 5, 9]
+    assert seq.num_cached_tokens == 5
+    assert seq.draft_token_ids == [10, 11, 12]
+
+
+def test_k3_prefill_reserves_two_recursive_lookahead_slots():
+    scheduler = make_k3_scheduler(block_size=4)
+    seq = Sequence(
+        [1, 2, 3, 4],
+        SamplingParams(temperature=0, max_tokens=8),
+    )
+    scheduler.add(seq)
+    batch = scheduler.schedule()
+    assert batch.sampled_sequences == [seq]
+    assert len(seq.block_table) == 2
+    assert scheduler.block_manager.num_append_blocks(seq, 6) == 0

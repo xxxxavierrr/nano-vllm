@@ -155,8 +155,8 @@ def parse_args(argv: list[str] | None = None):
     if args.warmup_num_requests <= 0:
         parser.error("--warmup-num-requests must be positive")
     if args.speculative_method == "mtp":
-        if args.num_speculative_tokens not in (1, 2):
-            parser.error("--num-speculative-tokens must be 1 or 2")
+        if args.num_speculative_tokens not in (1, 2, 3):
+            parser.error("--num-speculative-tokens must be 1, 2, or 3")
         if args.temperature != 0:
             parser.error("current MTP milestone requires --temperature 0")
         if args.mtp_model is not None and not Path(args.mtp_model).is_dir():
@@ -234,6 +234,7 @@ def main(argv: list[str] | None = None):
         "verification_rounds": 0,
         "accepted_position_1": 0,
         "accepted_position_2": 0,
+        "accepted_position_3": 0,
     }
     execution_mode_stats = {
         mode.value: {"steps": 0, "seconds": 0.0, "tokens": 0}
@@ -474,6 +475,12 @@ def main(argv: list[str] | None = None):
                 ),
                 "2": (
                     speculative_stats["accepted_position_2"]
+                    / speculative_stats["verification_rounds"]
+                    if speculative_stats["verification_rounds"]
+                    else 0.0
+                ),
+                "3": (
+                    speculative_stats["accepted_position_3"]
                     / speculative_stats["verification_rounds"]
                     if speculative_stats["verification_rounds"]
                     else 0.0

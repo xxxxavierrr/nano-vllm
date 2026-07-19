@@ -423,8 +423,8 @@ def parse_args(argv: list[str] | None = None):
     if args.max_pending_requests <= 0:
         parser.error("--max-pending-requests must be positive")
     if args.speculative_method == "mtp":
-        if args.num_speculative_tokens not in (1, 2):
-            parser.error("--num-speculative-tokens must be 1 or 2")
+        if args.num_speculative_tokens not in (1, 2, 3):
+            parser.error("--num-speculative-tokens must be 1, 2, or 3")
         if args.mtp_model is not None and not Path(args.mtp_model).is_dir():
             parser.error(f"MTP model directory does not exist: {args.mtp_model}")
     if args.piecewise_max_tokens <= 0:

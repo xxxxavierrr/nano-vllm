@@ -102,9 +102,9 @@ class Config:
                 raise ValueError("MTP v1 only supports Qwen3.5/3.6")
             if self.tensor_parallel_size != 1:
                 raise ValueError("Qwen3.5/3.6 MTP v1 only supports TP=1")
-            if self.num_speculative_tokens not in (1, 2):
+            if self.num_speculative_tokens not in (1, 2, 3):
                 raise ValueError(
-                    "MTP v1 supports one or two speculative tokens"
+                    "MTP v1 supports one, two, or three speculative tokens"
                 )
             minimum_batch_tokens = 1 + self.num_speculative_tokens
             if self.max_num_batched_tokens < minimum_batch_tokens:

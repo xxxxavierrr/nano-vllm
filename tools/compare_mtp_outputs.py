@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--warmup-tokens", type=int, default=2)
     parser.add_argument(
-        "--num-speculative-tokens", type=int, choices=[1, 2], default=2
+        "--num-speculative-tokens", type=int, choices=[1, 2, 3], default=2
     )
     parser.add_argument("--max-model-len", type=int, default=256)
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
@@ -75,6 +75,7 @@ def run_case(args, *, use_mtp: bool):
         "verification_rounds": 0,
         "accepted_position_1": 0,
         "accepted_position_2": 0,
+        "accepted_position_3": 0,
     }
     try:
         llm.generate(
@@ -121,6 +122,9 @@ def run_case(args, *, use_mtp: bool):
             speculative["accepted_position_2"] += (
                 stats.speculative_accepted_position_2
             )
+            speculative["accepted_position_3"] += (
+                stats.speculative_accepted_position_3
+            )
         generate_seconds = perf_counter() - started
         return {
             "init_seconds": init_seconds,
@@ -153,6 +157,12 @@ def run_case(args, *, use_mtp: bool):
                     ),
                     "2": (
                         speculative["accepted_position_2"]
+                        / speculative["verification_rounds"]
+                        if speculative["verification_rounds"]
+                        else 0.0
+                    ),
+                    "3": (
+                        speculative["accepted_position_3"]
                         / speculative["verification_rounds"]
                         if speculative["verification_rounds"]
                         else 0.0

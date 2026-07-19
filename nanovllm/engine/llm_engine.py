@@ -35,6 +35,7 @@ class EngineStepStats:
     speculative_verification_rounds: int = 0
     speculative_accepted_position_1: int = 0
     speculative_accepted_position_2: int = 0
+    speculative_accepted_position_3: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -158,6 +159,9 @@ class LLMEngine:
             ],
             speculative_accepted_position_2=speculative[
                 "accepted_position_2"
+            ],
+            speculative_accepted_position_3=speculative[
+                "accepted_position_3"
             ],
         )
 

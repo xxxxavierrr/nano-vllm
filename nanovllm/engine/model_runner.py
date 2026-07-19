@@ -129,6 +129,7 @@ class ModelRunner:
             "verification_rounds": 0,
             "accepted_position_1": 0,
             "accepted_position_2": 0,
+            "accepted_position_3": 0,
         }
         self.piecewise_model = None
         if self.cudagraph_mode.uses_piecewise:
@@ -1144,6 +1145,7 @@ class ModelRunner:
             "verification_rounds": 0,
             "accepted_position_1": 0,
             "accepted_position_2": 0,
+            "accepted_position_3": 0,
         }
         sampled_seqs = [seq for seq in seqs if seq.will_sample]
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs)
@@ -1281,6 +1283,12 @@ class ModelRunner:
                 ),
                 "accepted_position_2": sum(
                     int(seq.is_speculative and accepted_count >= 2)
+                    for seq, accepted_count in zip(
+                        sampled_seqs, accepted_counts
+                    )
+                ),
+                "accepted_position_3": sum(
+                    int(seq.is_speculative and accepted_count >= 3)
                     for seq, accepted_count in zip(
                         sampled_seqs, accepted_counts
                     )
