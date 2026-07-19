@@ -31,6 +31,7 @@ class EngineRequest:
     request_id: str
     _queue: asyncio.Queue
     _client: "EngineClient"
+    replica_id: int = 0
     _closed: bool = False
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
@@ -59,10 +60,12 @@ class EngineClient:
         endpoint: str,
         max_pending_requests: int = 1024,
         process: mp.Process | None = None,
+        replica_id: int = 0,
     ):
         self.endpoint = endpoint
         self.max_pending_requests = max_pending_requests
         self.process = process
+        self.replica_id = replica_id
         self._context: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._receiver_task: asyncio.Task | None = None
@@ -121,7 +124,7 @@ class EngineClient:
         except BaseException:
             self._requests.pop(request_id, None)
             raise
-        return EngineRequest(request_id, queue, self)
+        return EngineRequest(request_id, queue, self, self.replica_id)
 
     async def abort(self, request_id: str):
         queue = self._requests.pop(request_id, None)
@@ -215,6 +218,107 @@ class EngineClient:
             self._socket.close(linger=0)
         if self._context is not None:
             self._context.term()
+
+
+class DataParallelEngineClient:
+    """Route whole requests across independent engine replicas.
+
+    Each request remains owned by the selected EngineClient, so streaming events
+    and aborts cannot accidentally cross replica boundaries.
+    """
+
+    def __init__(
+        self,
+        clients: list[EngineClient],
+        max_pending_requests: int = 1024,
+    ):
+        if not clients:
+            raise ValueError("at least one engine replica is required")
+        if max_pending_requests <= 0:
+            raise ValueError("max_pending_requests must be positive")
+        self.clients = clients
+        self.max_pending_requests = max_pending_requests
+        self._selection_lock = asyncio.Lock()
+        self._cursor = 0
+
+    @property
+    def pending_requests(self) -> int:
+        return sum(client.pending_requests for client in self.clients)
+
+    @property
+    def process_alive(self) -> bool:
+        return any(client.process_alive for client in self.clients)
+
+    async def submit(
+        self,
+        prompt_token_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str | None = None,
+    ) -> EngineRequest:
+        async with self._selection_lock:
+            if self.pending_requests >= self.max_pending_requests:
+                raise RequestQueueFullError("data-parallel request queue is full")
+            candidates = [client for client in self.clients if client.process_alive]
+            if not candidates:
+                raise EngineUnavailableError("no data-parallel engine replica is running")
+
+            minimum_load = min(client.pending_requests for client in candidates)
+            least_loaded = {
+                client.replica_id
+                for client in candidates
+                if client.pending_requests == minimum_load
+            }
+            selected: EngineClient | None = None
+            for offset in range(len(self.clients)):
+                index = (self._cursor + offset) % len(self.clients)
+                candidate = self.clients[index]
+                if candidate.replica_id in least_loaded and candidate.process_alive:
+                    selected = candidate
+                    self._cursor = (index + 1) % len(self.clients)
+                    break
+            if selected is None:
+                raise EngineUnavailableError("no data-parallel engine replica is available")
+
+            return await selected.submit(
+                prompt_token_ids,
+                sampling_params,
+                request_id=request_id,
+            )
+
+    async def replica_status(self, timeout: float = 0.5) -> list[dict[str, Any]]:
+        async def inspect(client: EngineClient) -> dict[str, Any]:
+            ready = False
+            if client.process_alive:
+                try:
+                    await client.ping(timeout=timeout)
+                    ready = True
+                except Exception:
+                    pass
+            return {
+                "replica_id": client.replica_id,
+                "alive": client.process_alive,
+                "ready": ready,
+                "pending_requests": client.pending_requests,
+            }
+
+        return await asyncio.gather(*(inspect(client) for client in self.clients))
+
+    async def ping(self, timeout: float = 0.5) -> dict[str, Any]:
+        replicas = await self.replica_status(timeout=timeout)
+        healthy = sum(1 for replica in replicas if replica["ready"])
+        if healthy == 0:
+            raise EngineUnavailableError("no data-parallel engine replica is ready")
+        return {
+            "type": MessageType.PONG,
+            "healthy_replicas": healthy,
+            "replicas": replicas,
+        }
+
+    async def close(self, shutdown_engine: bool = True):
+        await asyncio.gather(*(
+            client.close(shutdown_engine=shutdown_engine)
+            for client in self.clients
+        ))
 
 
 def _encode_message(message: dict[str, Any]) -> bytes:

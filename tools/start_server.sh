@@ -16,6 +16,9 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 SPECULATIVE_METHOD="${SPECULATIVE_METHOD:-none}"
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-2}"
 MTP_MODEL="${MTP_MODEL:-}"
+DATA_PARALLEL_SIZE="${DATA_PARALLEL_SIZE:-1}"
+DATA_PARALLEL_SIMULATE="${DATA_PARALLEL_SIMULATE:-0}"
+DEVICE_IDS="${DEVICE_IDS:-}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
     echo "Python not found: $PYTHON_BIN" >&2
@@ -35,6 +38,17 @@ cd "$REPO_ROOT"
 echo "Starting nano-vLLM on http://$HOST:$PORT"
 echo "Model: $MODEL_PATH (served as $SERVED_MODEL_NAME)"
 
+EXTRA_ARGS=()
+if [[ -n "$MTP_MODEL" ]]; then
+    EXTRA_ARGS+=(--mtp-model "$MTP_MODEL")
+fi
+if [[ -n "$DEVICE_IDS" ]]; then
+    EXTRA_ARGS+=(--device-ids "$DEVICE_IDS")
+fi
+if [[ "$DATA_PARALLEL_SIMULATE" == "1" ]]; then
+    EXTRA_ARGS+=(--data-parallel-simulate)
+fi
+
 exec "$PYTHON_BIN" -m nanovllm.serve.api_server \
     --model "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
@@ -46,7 +60,8 @@ exec "$PYTHON_BIN" -m nanovllm.serve.api_server \
     --kv-cache-dtype "$KV_CACHE_DTYPE" \
     --speculative-method "$SPECULATIVE_METHOD" \
     --num-speculative-tokens "$NUM_SPECULATIVE_TOKENS" \
-    ${MTP_MODEL:+--mtp-model "$MTP_MODEL"} \
+    --data-parallel-size "$DATA_PARALLEL_SIZE" \
     --cudagraph-mode "$CUDAGRAPH_MODE" \
     --piecewise-max-tokens "$PIECEWISE_MAX_TOKENS" \
+    "${EXTRA_ARGS[@]}" \
     "$@"

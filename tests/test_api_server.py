@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from nanovllm.serve.api_server import (
     ServerSettings,
+    _build_replica_engine_kwargs,
     _stream_chat_completion,
     create_app,
     parse_args,
@@ -16,6 +17,7 @@ class FakeEngineRequest:
     def __init__(self, events):
         self._events = events
         self.aborted = False
+        self.replica_id = 0
 
     async def events(self):
         for event in self._events:
@@ -79,6 +81,39 @@ def test_graph_cli_defaults_and_explicit_eager_flag(tmp_path):
     assert eager.enforce_eager is True
 
 
+def test_data_parallel_cli_device_mapping(tmp_path):
+    distributed = parse_args([
+        "--model",
+        str(tmp_path),
+        "--data-parallel-size",
+        "2",
+        "--device-ids",
+        "0,1",
+    ])
+    assert distributed.data_parallel_size == 2
+    assert distributed.device_ids == [0, 1]
+    assert distributed.data_parallel_simulate is False
+
+    simulated = parse_args([
+        "--model",
+        str(tmp_path),
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-simulate",
+        "--device-ids",
+        "0",
+    ])
+    assert simulated.device_ids == [0, 0]
+    replicas = _build_replica_engine_kwargs(simulated, "test-shm")
+    assert [replica["device_ids"] for replica in replicas] == [[0], [0]]
+    assert [replica["master_port"] for replica in replicas] == [2333, 2334]
+    assert [replica["shm_name"] for replica in replicas] == [
+        "test-shm-dp0",
+        "test-shm-dp1",
+    ]
+    assert [replica["gpu_memory_utilization"] for replica in replicas] == [0.45, 0.9]
+
+
 def test_non_streaming_chat_completion():
     with make_client() as client:
         response = client.post("/v1/chat/completions", json={
@@ -97,6 +132,7 @@ def test_non_streaming_chat_completion():
         "total_tokens": 5,
         "prompt_tokens_details": {"cached_tokens": 0},
     }
+    assert response.headers["x-nanovllm-dp-replica"] == "0"
 
 
 def test_streaming_chat_completion_uses_openai_sse_frames():
@@ -114,6 +150,7 @@ def test_streaming_chat_completion_uses_openai_sse_frames():
     assert '"content":" world"' in response.text
     assert '"finish_reason":"length"' in response.text
     assert response.text.endswith("data: [DONE]\n\n")
+    assert response.headers["x-nanovllm-dp-replica"] == "0"
 
 
 def test_streaming_chat_completion_can_include_usage():
@@ -163,4 +200,3 @@ def test_closing_stream_aborts_engine_request():
         assert engine_request.aborted
 
     asyncio.run(scenario())
-

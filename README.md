@@ -140,6 +140,35 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
+### Data-parallel serving
+
+Request-level data parallelism starts one independent engine, Scheduler, and
+KV Cache per replica. Device IDs are flattened by DP group, so `DP=2, TP=1`
+uses `--device-ids 0,1`, while `DP=2, TP=2` uses `0,1,2,3`:
+
+```bash
+nano-vllm-serve --model /YOUR/MODEL/PATH \
+  --data-parallel-size 2 --tensor-parallel-size 1 --device-ids 0,1
+```
+
+The router sends each whole request to the least-loaded live replica and keeps
+streaming output and aborts bound to that replica. `/health` reports per-replica
+readiness and queue depth. Chat responses include
+`X-NanoVLLM-DP-Replica` for routing diagnostics.
+
+A single GPU can run a functional simulation with repeated device IDs. This
+validates process isolation, routing, streaming, cancellation, and shutdown,
+but must not be used to measure DP speedup:
+
+```bash
+nano-vllm-serve --model /YOUR/MODEL/PATH \
+  --data-parallel-size 2 --data-parallel-simulate --device-ids 0 \
+  --gpu-memory-utilization 0.5 --enforce-eager
+```
+
+`tools/start_server.sh` exposes the same settings through
+`DATA_PARALLEL_SIZE`, `DATA_PARALLEL_SIMULATE=1`, and `DEVICE_IDS`.
+
 ## CUDA Graph modes
 
 `FULL_AND_PIECEWISE` is the default execution mode. Uniform decode batches use

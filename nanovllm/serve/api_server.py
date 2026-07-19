@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import AutoConfig, AutoTokenizer
@@ -18,6 +18,7 @@ import uvicorn
 
 from nanovllm.engine.cudagraph import CUDAGraphMode
 from nanovllm.serve.engine import (
+    DataParallelEngineClient,
     EngineClient,
     EngineRequest,
     EngineRequestError,
@@ -82,10 +83,19 @@ class ServerSettings:
     max_pending_requests: int = 1024
     max_model_len: int = 4096
     engine_kwargs: dict | None = None
+    data_parallel_size: int = 1
+    replica_engine_kwargs: list[dict] | None = None
 
     @property
     def engine_endpoint(self) -> str:
         return f"tcp://{self.engine_host}:{self.engine_port}"
+
+    @property
+    def engine_endpoints(self) -> list[str]:
+        return [
+            f"tcp://{self.engine_host}:{self.engine_port + replica_id}"
+            for replica_id in range(self.data_parallel_size)
+        ]
 
 
 class ServingRuntime:
@@ -96,25 +106,50 @@ class ServingRuntime:
         self.max_model_len = min(settings.max_model_len, hf_config.max_position_embeddings)
         self._tokenizer_lock = threading.Lock()
         self.process: mp.Process | None = None
-        self.client: EngineClient | None = None
+        self.processes: list[mp.Process] = []
+        self.replica_clients: list[EngineClient] = []
+        self.client: DataParallelEngineClient | None = None
 
     async def start(self):
         context = mp.get_context("spawn")
-        self.process = context.Process(
-            target=run_engine_proc,
-            args=(self.settings.engine_endpoint, self.settings.model, self.settings.engine_kwargs or {}),
-            daemon=False,
-            name="nanovllm-engine",
-        )
-        self.process.start()
-        self.client = EngineClient(
-            self.settings.engine_endpoint,
-            max_pending_requests=self.settings.max_pending_requests,
-            process=self.process,
-        )
-        await self.client.start()
+        replica_kwargs = self.settings.replica_engine_kwargs
+        if replica_kwargs is None:
+            replica_kwargs = [
+                dict(self.settings.engine_kwargs or {})
+                for _ in range(self.settings.data_parallel_size)
+            ]
+        if len(replica_kwargs) != self.settings.data_parallel_size:
+            raise ValueError("replica_engine_kwargs count must match data_parallel_size")
+
         try:
-            await self.client.wait_until_ready(self.settings.startup_timeout)
+            # Start sequentially to avoid multiplying checkpoint I/O and host RAM peaks.
+            for replica_id, (endpoint, engine_kwargs) in enumerate(zip(
+                self.settings.engine_endpoints,
+                replica_kwargs,
+                strict=True,
+            )):
+                process = context.Process(
+                    target=run_engine_proc,
+                    args=(endpoint, self.settings.model, engine_kwargs),
+                    daemon=False,
+                    name=f"nanovllm-engine-dp{replica_id}",
+                )
+                process.start()
+                client = EngineClient(
+                    endpoint,
+                    max_pending_requests=self.settings.max_pending_requests,
+                    process=process,
+                    replica_id=replica_id,
+                )
+                self.processes.append(process)
+                self.replica_clients.append(client)
+                self.process = self.process or process
+                await client.start()
+                await client.wait_until_ready(self.settings.startup_timeout)
+            self.client = DataParallelEngineClient(
+                self.replica_clients,
+                max_pending_requests=self.settings.max_pending_requests,
+            )
         except BaseException:
             await self.close(graceful=False)
             raise
@@ -122,11 +157,16 @@ class ServingRuntime:
     async def close(self, graceful: bool = True):
         if self.client is not None:
             await self.client.close(shutdown_engine=graceful)
-        if self.process is not None:
-            await asyncio.to_thread(self.process.join, 10 if graceful else 0)
-            if self.process.is_alive():
-                self.process.terminate()
-                await asyncio.to_thread(self.process.join, 5)
+        elif self.replica_clients:
+            await asyncio.gather(*(
+                client.close(shutdown_engine=graceful)
+                for client in self.replica_clients
+            ))
+        for process in self.processes:
+            await asyncio.to_thread(process.join, 10 if graceful else 0)
+            if process.is_alive():
+                process.terminate()
+                await asyncio.to_thread(process.join, 5)
 
     def encode_messages(self, messages: list[ChatMessage]) -> list[int]:
         payload = [message.model_dump() for message in messages]
@@ -154,6 +194,11 @@ class ServingRuntime:
             return True
         except Exception:
             return False
+
+    async def replica_status(self) -> list[dict]:
+        if self.client is None:
+            return []
+        return await self.client.replica_status(timeout=0.5)
 
 
 def _completion_base(completion_id: str, created: int, model: str, object_type: str):
@@ -291,7 +336,17 @@ def create_app(settings: ServerSettings, runtime: ServingRuntime | None = None) 
     async def health():
         if not await runtime.healthy():
             raise HTTPException(status_code=503, detail="engine is unavailable")
-        return {"status": "ok"}
+        get_replica_status = getattr(runtime, "replica_status", None)
+        if get_replica_status is None:
+            return {"status": "ok"}
+        replicas = await get_replica_status()
+        healthy_replicas = sum(1 for replica in replicas if replica["ready"])
+        return {
+            "status": "ok" if healthy_replicas == len(replicas) else "degraded",
+            "data_parallel_size": len(replicas),
+            "healthy_replicas": healthy_replicas,
+            "replicas": replicas,
+        }
 
     @app.get("/v1/models")
     async def models():
@@ -306,7 +361,11 @@ def create_app(settings: ServerSettings, runtime: ServingRuntime | None = None) 
         }
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(body: ChatCompletionRequest, request: Request):
+    async def chat_completions(
+        body: ChatCompletionRequest,
+        request: Request,
+        response: Response,
+    ):
         if body.model != settings.served_model_name:
             raise HTTPException(status_code=404, detail=f"model not found: {body.model}")
         prompt_token_ids = await asyncio.to_thread(runtime.encode_messages, body.messages)
@@ -339,6 +398,7 @@ def create_app(settings: ServerSettings, runtime: ServingRuntime | None = None) 
 
         completion_id = f"chatcmpl-{uuid4().hex}"
         created = int(time.time())
+        replica_header = str(engine_request.replica_id)
         if body.stream:
             return StreamingResponse(
                 _stream_chat_completion(
@@ -351,8 +411,13 @@ def create_app(settings: ServerSettings, runtime: ServingRuntime | None = None) 
                     bool(body.stream_options and body.stream_options.include_usage),
                 ),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-NanoVLLM-DP-Replica": replica_header,
+                },
             )
+        response.headers["X-NanoVLLM-DP-Replica"] = replica_header
         try:
             return await _collect_chat_completion(
                 runtime,
@@ -395,6 +460,12 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--num-speculative-tokens", type=int, default=2)
     parser.add_argument("--mtp-model")
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--data-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--data-parallel-simulate",
+        action="store_true",
+        help="allow DP replicas to share one GPU for functional testing only",
+    )
     parser.add_argument("--device-ids", type=_parse_device_ids)
     parser.add_argument("--master-port", type=int, default=2333)
     parser.add_argument("--shm-name")
@@ -414,12 +485,33 @@ def parse_args(argv: list[str] | None = None):
         parser.error(f"model directory does not exist: {args.model}")
     if not 1 <= args.port <= 65535 or not 1 <= args.engine_port <= 65535:
         parser.error("ports must be in [1, 65535]")
+    if args.engine_port + args.data_parallel_size - 1 > 65535:
+        parser.error("DP engine port range exceeds 65535")
     if not 1 <= args.master_port <= 65535:
         parser.error("--master-port must be in [1, 65535]")
+    if args.master_port + args.data_parallel_size - 1 > 65535:
+        parser.error("DP master port range exceeds 65535")
     if not 1 <= args.tensor_parallel_size <= 8:
         parser.error("--tensor-parallel-size must be in [1, 8]")
-    if args.device_ids is not None and len(args.device_ids) != args.tensor_parallel_size:
-        parser.error("--device-ids count must match --tensor-parallel-size")
+    if not 1 <= args.data_parallel_size <= 16:
+        parser.error("--data-parallel-size must be in [1, 16]")
+    expected_devices = args.data_parallel_size * args.tensor_parallel_size
+    if args.data_parallel_simulate:
+        if args.data_parallel_size == 1:
+            parser.error("--data-parallel-simulate requires --data-parallel-size > 1")
+        if args.tensor_parallel_size != 1:
+            parser.error("single-GPU DP simulation only supports tensor_parallel_size=1")
+        if args.device_ids is None:
+            args.device_ids = [0] * args.data_parallel_size
+        elif len(args.device_ids) == 1:
+            args.device_ids *= args.data_parallel_size
+        elif len(args.device_ids) != expected_devices:
+            parser.error("simulation device IDs must contain one ID or one per DP replica")
+    else:
+        if args.device_ids is not None and len(args.device_ids) != expected_devices:
+            parser.error("--device-ids count must equal data_parallel_size * tensor_parallel_size")
+        if args.device_ids is not None and len(set(args.device_ids)) != len(args.device_ids):
+            parser.error("duplicate device IDs require --data-parallel-simulate")
     if args.max_pending_requests <= 0:
         parser.error("--max-pending-requests must be positive")
     if args.speculative_method == "mtp":
@@ -432,17 +524,14 @@ def parse_args(argv: list[str] | None = None):
     return args
 
 
-def main(argv: list[str] | None = None):
-    args = parse_args(argv)
-    served_model_name = args.served_model_name or Path(args.model).name
-    shm_name = args.shm_name or f"nanovllm-{uuid4().hex}"
-    engine_kwargs = {
+def _build_replica_engine_kwargs(args, shm_name: str) -> list[dict]:
+    base_engine_kwargs = {
         "quantization": args.quantization,
         "kv_cache_dtype": args.kv_cache_dtype,
+        "speculative_method": args.speculative_method,
+        "num_speculative_tokens": args.num_speculative_tokens,
+        "mtp_model": args.mtp_model,
         "tensor_parallel_size": args.tensor_parallel_size,
-        "device_ids": args.device_ids,
-        "master_port": args.master_port,
-        "shm_name": shm_name,
         "max_num_seqs": args.max_num_seqs,
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_model_len": args.max_model_len,
@@ -451,6 +540,50 @@ def main(argv: list[str] | None = None):
         "cudagraph_mode": args.cudagraph_mode,
         "piecewise_max_tokens": args.piecewise_max_tokens,
     }
+    if args.device_ids is None:
+        flat_device_ids = (
+            None
+            if args.data_parallel_size == 1
+            else list(range(args.data_parallel_size * args.tensor_parallel_size))
+        )
+    else:
+        flat_device_ids = args.device_ids
+    replica_engine_kwargs = []
+    for replica_id in range(args.data_parallel_size):
+        engine_kwargs = dict(base_engine_kwargs)
+        if args.data_parallel_simulate:
+            # ModelRunner interprets utilization as a cumulative fraction of the
+            # whole device. Sequential replicas therefore need rising watermarks
+            # so each receives an equal incremental cache budget.
+            engine_kwargs["gpu_memory_utilization"] = (
+                args.gpu_memory_utilization
+                * (replica_id + 1)
+                / args.data_parallel_size
+            )
+        if flat_device_ids is None:
+            engine_kwargs["device_ids"] = None
+        else:
+            start = replica_id * args.tensor_parallel_size
+            engine_kwargs["device_ids"] = flat_device_ids[
+                start:start + args.tensor_parallel_size
+            ]
+        engine_kwargs["master_port"] = args.master_port + replica_id
+        engine_kwargs["shm_name"] = f"{shm_name}-dp{replica_id}"
+        replica_engine_kwargs.append(engine_kwargs)
+    return replica_engine_kwargs
+
+
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
+    served_model_name = args.served_model_name or Path(args.model).name
+    shm_name = args.shm_name or f"nanovllm-{uuid4().hex}"
+    replica_engine_kwargs = _build_replica_engine_kwargs(args, shm_name)
+    if args.data_parallel_simulate:
+        print(
+            "WARNING: DP simulation shares one GPU; it validates routing and lifecycle "
+            "only, not data-parallel performance.",
+            flush=True,
+        )
     settings = ServerSettings(
         model=args.model,
         served_model_name=served_model_name,
@@ -461,7 +594,9 @@ def main(argv: list[str] | None = None):
         startup_timeout=args.startup_timeout,
         max_pending_requests=args.max_pending_requests,
         max_model_len=args.max_model_len,
-        engine_kwargs=engine_kwargs,
+        engine_kwargs=replica_engine_kwargs[0],
+        data_parallel_size=args.data_parallel_size,
+        replica_engine_kwargs=replica_engine_kwargs,
     )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
 
