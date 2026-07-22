@@ -453,6 +453,11 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--startup-timeout", type=float, default=1200.0)
     parser.add_argument("--max-pending-requests", type=int, default=1024)
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
+    parser.add_argument(
+        "--gptq-kernel-backend",
+        choices=["auto", "triton", "marlin"],
+        default="auto",
+    )
     parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument(
         "--speculative-method", choices=["none", "mtp"], default="none"
@@ -527,6 +532,7 @@ def parse_args(argv: list[str] | None = None):
 def _build_replica_engine_kwargs(args, shm_name: str) -> list[dict]:
     base_engine_kwargs = {
         "quantization": args.quantization,
+        "gptq_kernel_backend": args.gptq_kernel_backend,
         "kv_cache_dtype": args.kv_cache_dtype,
         "speculative_method": args.speculative_method,
         "num_speculative_tokens": args.num_speculative_tokens,

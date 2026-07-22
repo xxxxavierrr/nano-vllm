@@ -11,6 +11,10 @@
 - `--mode online-sweep` performs offered-load growth and boundary refinement;
   optional `nvidia-smi` telemetry records sampling provenance or an explicit
   missing reason.
+- Native W4 support is now an explicit opt-in build/runtime backend with safe
+  Triton fallback, SM89/layout guards, small/large-M W4A16 entry points, and a
+  disabled experimental large-M W4A8 entry point. It is source-complete for
+  later server iteration, not performance-validated.
 
 GPU validation, kernel implementation, real DSpark calibration, and FP8
 DeltaNet state work remain active and are not claimed complete.

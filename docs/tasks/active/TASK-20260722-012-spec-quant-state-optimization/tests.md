@@ -88,12 +88,19 @@ Implemented local evidence:
   exponential growth and binary refinement.
 - Fake-reader telemetry tests cover sampling/reporting without requiring
   `nvidia-smi`; the focused goodput suite passes (`12 passed`).
+- Native W4 CPU tests cover safe default fallback, explicit extension failure,
+  SM89 gating, the `M=64/65` shape boundary, normalized layout rejection, and
+  per-row/per-group W4A8 activation quantization (`32 passed, 17 CUDA skipped`
+  with the wider GPTQ/config/API regression set).
 
 Deferred evidence:
 
 - New recurrent and causal-conv prefix-state CUDA tests are written but skipped
   locally because CUDA is unavailable.
 - Repacked W4 Triton correctness/compile/Graph tests are written but skipped.
+- Native `.cu` compilation, numerical equivalence, tensor-core utilization,
+  Full/Piecewise Graph behavior, and latency are pending on RTX 4090D. Source
+  presence and CPU dispatch tests are not CUDA validation.
 - Full/Piecewise Graph replay, end-to-end Qwen3.6 accuracy, 24 GB capacity,
   online serving, and all performance benchmarks require the RTX 4090D server.
 - Full local collection is additionally blocked by missing `flash_attn`; broad

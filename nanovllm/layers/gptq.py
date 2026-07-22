@@ -17,6 +17,7 @@ class GPTQConfig:
     sym: bool = True
     desc_act: bool = False
     pack_dtype: str = "int32"
+    kernel_backend: str = "auto"
 
     @classmethod
     def from_dict(cls, value: dict) -> "GPTQConfig":
@@ -33,6 +34,7 @@ class GPTQConfig:
             sym=bool(value.get("sym", True)),
             desc_act=bool(value.get("desc_act", False)),
             pack_dtype=str(value.get("pack_dtype", "int32")).lower(),
+            kernel_backend=str(value.get("kernel_backend", "auto")).lower(),
         )
         config.validate()
         return config
@@ -49,6 +51,10 @@ class GPTQConfig:
         if self.pack_dtype not in ("int32", "torch.int32"):
             raise ValueError(
                 f"GPTQ v1 requires int32 packing, got {self.pack_dtype!r}"
+            )
+        if self.kernel_backend not in ("auto", "triton", "marlin"):
+            raise ValueError(
+                "GPTQ kernel_backend must be 'auto', 'triton', or 'marlin'"
             )
 
     @property

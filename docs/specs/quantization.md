@@ -186,6 +186,13 @@ Follow-up architecture requirements:
   operator remains a correctness/fallback path; the production target is an
   Ada SM89/RTX 4090D-oriented Marlin-style CUDA kernel whose dataflow does not
   construct a reusable BF16 weight tile in global memory.
+- Native CUDA extension construction is explicit opt-in through
+  `NANOVLLM_BUILD_CUDA_EXT=1`. Until RTX 4090D validation is recorded,
+  `auto` remains Triton; `marlin` is an explicit experimental request that
+  fails if the SM89 extension or normalized symmetric repacked layout is
+  unavailable. Native W4A16 dispatch uses `M<=64` and `M>64` shape regimes;
+  experimental W4A8 is large-M only and creates no global INT8 activation
+  scratch.
 
 ## Constraints
 
@@ -212,3 +219,6 @@ target checkpoint shapes.
 - 2026-07-22: Ordered optimization around Marlin-style W4A16 small/large-M,
   then fused W4A8 large-M and measured FP8 cache/state capacity; deferred
   W3A16 until goodput evidence proves memory remains the limiting resource.
+- 2026-07-22: Added the opt-in SM89 native-extension contract, safe Triton
+  default, explicit native layout validation, and experimental large-M W4A8
+  source boundary; CUDA validation remains required before enablement.

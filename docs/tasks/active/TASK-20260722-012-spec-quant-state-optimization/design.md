@@ -107,11 +107,12 @@ The order is based on removing known computation waste before trading numerical
 precision for memory. Already implemented foundations are not new development
 milestones; they remain GPU validation gates.
 
-1. **Marlin-style W4A16 small-M and large-M -- not implemented.** Normalize
-   GPTQ/AWQ checkpoint formats into runtime layouts at load time. Use shape/SM-
-   based dispatch, with small-M decode/small mixed tiles and tiled large-M
-   prefill/mixed kernels. The existing load-time GPTQ repack and repacked Triton
-   operator are the correctness/fallback foundation, not the Marlin backend.
+1. **Marlin-style W4A16 small-M and large-M -- opt-in source scaffolded, GPU
+   validation and optimization pending.** The native extension, SM89/layout
+   gates, `M<=64`/large-M dispatch, packed in-operator decode, and fallback are
+   present. `auto` deliberately remains Triton. CUDA build correctness,
+   tensor-core dataflow optimization, Graph capture, and target-shape
+   performance are not yet established and must not be represented as done.
 2. **DeltaNet speculative state branches -- implemented locally, GPU validation
    pending.** Indexed prefix states and commit-by-remap replace partial-
    rejection target replay. Do not implement this a second time.
@@ -120,10 +121,10 @@ milestones; they remain GPU validation gates.
    temperature sampling already uses `p/q` acceptance and normalized `(p-q)+`
    recovery with deterministic request RNG. Remaining work is integrated GPU,
    Graph, distribution, and blockwise-kernel validation/optimization.
-4. **Fused W4A8 large-M -- not implemented.** Quantize activations and consume
-   packed W4 weights in one large-M operator. Keep W4A16 for small-M unless
-   measurement proves a W4A8 small-M benefit. Do not introduce a global
-   activation-quantization scratch or a scheduler-label branch.
+4. **Fused W4A8 large-M -- experimental source scaffolded, disabled.** The
+   native operator performs per-row/per-group activation quantization while
+   consuming packed W4 weights without a global activation scratch. It is not
+   selected by production dispatch until numerical and goodput evidence exists.
 5. **FP8 KV capacity experiment -- runtime implemented, experiment pending.**
    Compare native and existing FP8 KV at each mode's maximum stable concurrency
    and long-context workloads. Adopt only if extra concurrency raises SLO

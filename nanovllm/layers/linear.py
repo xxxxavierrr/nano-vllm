@@ -273,6 +273,7 @@ class LinearBase(nn.Module):
                 input_perm=self.gptq_input_perm,
                 direct_groups=self._gptq_direct_groups,
                 group_size=self.quant_config.group_size,
+                backend=self.quant_config.kernel_backend,
             )
         if self.weight_scale is None:
             return F.linear(x, self.weight, bias)

@@ -22,9 +22,12 @@
   accepted tokens/s, SLO-good output-token throughput, time-weighted running
   requests, scheduled actual/padded tokens, and GPU telemetry provenance; add
   an open-loop offered-load sweep for maximum SLO throughput.
-- [>] Implement and validate Marlin-style W4A16 small-M and large-M kernels,
-  selected by shape and SM89 capability, with GPTQ/AWQ load-time normalization.
-- [ ] Build the INT4 DSpark checkpoint by persisting real target-produced draft
+- [x] Add an opt-in native SM89 W4 extension, small/large-M W4A16 dispatcher,
+  experimental large-M W4A8 source, layout validation, and safe Triton
+  fallback. CUDA compilation/correctness/performance remain a later GPU gate.
+- [ ] Validate and optimize the native W4A16/W4A8 implementation on SM89,
+  including tensor-core dataflow, Graph behavior, and target shapes.
+- [>] Build the INT4 DSpark checkpoint by persisting real target-produced draft
   inputs, then loading the BF16 draft alone for calibration/reference. Never
   plan an online BF16-draft-plus-target cell on the 24 GB GPU.
 - [ ] Record the first runnable paired-AWQ-target + INT4-draft baseline,

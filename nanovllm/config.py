@@ -11,6 +11,7 @@ from nanovllm.layers.gptq import GPTQConfig
 class Config:
     model: str
     quantization: str | None = None
+    gptq_kernel_backend: str = "auto"
     kv_cache_dtype: str = "auto"
     speculative_method: str = "none"
     num_speculative_tokens: int = 2
@@ -81,7 +82,15 @@ class Config:
                 raise ValueError("GPTQ requires checkpoint quantization_config metadata")
             if self.tensor_parallel_size != 1:
                 raise ValueError("GPTQ W4A16 v1 only supports tensor_parallel_size=1")
+            quantization_config = {
+                **quantization_config,
+                "kernel_backend": self.gptq_kernel_backend,
+            }
             self.gptq_config = GPTQConfig.from_dict(quantization_config)
+        elif self.gptq_kernel_backend != "auto":
+            raise ValueError(
+                "gptq_kernel_backend requires quantization='gptq'"
+            )
 
         if self.model_family == "qwen3_5":
             if text_config is None:

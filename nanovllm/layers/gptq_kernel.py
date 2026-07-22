@@ -5,6 +5,14 @@ import triton
 import triton.language as tl
 from torch.library import triton_op, wrap_triton
 
+from nanovllm.layers.gptq_native import (
+    W4Backend,
+    W4Kernel,
+    native_w4a16_linear,
+    select_w4_kernel,
+    validate_native_w4_layout,
+)
+
 
 _AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 32}, num_warps=4),
@@ -270,8 +278,28 @@ def gptq_w4a16_linear(
     input_perm: torch.Tensor | None = None,
     direct_groups: bool = False,
     group_size: int = 128,
+    backend: W4Backend | str = W4Backend.AUTO,
 ) -> torch.Tensor:
     input_shape = x.shape
+    m = x.numel() // x.shape[-1]
+    capability = torch.cuda.get_device_capability(x.device) if x.is_cuda else None
+    selected = select_w4_kernel(m, backend, capability=capability)
+    if selected is not W4Kernel.TRITON:
+        validate_native_w4_layout(
+            symmetric_zero=symmetric_zero,
+            direct_groups=direct_groups,
+            input_perm_numel=0 if input_perm is None else input_perm.numel(),
+            k=x.shape[-1],
+            group_size=group_size,
+        )
+        return native_w4a16_linear(
+            x,
+            qweight,
+            scales,
+            bias,
+            group_size=group_size,
+            kernel=selected,
+        )
     if input_perm is None:
         input_perm = torch.empty(0, dtype=torch.int32, device=x.device)
     output = _gptq_w4a16(

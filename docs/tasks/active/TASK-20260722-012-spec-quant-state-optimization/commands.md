@@ -54,3 +54,24 @@
 - `compileall` and `git diff --check` passed after the goodput changes.
 - No package installation, model download, GPU command, server command, or
   push was performed.
+
+## 2026-07-22 native W4 local scaffold
+
+- Added an opt-in setuptools CUDA extension (`NANOVLLM_BUILD_CUDA_EXT=1`) with
+  SM89 compile target; default installation does not import the PyTorch C++
+  extension toolchain.
+- Added explicit `auto|triton|marlin` backend selection. `auto` remains Triton;
+  native selection requires extension availability, SM89, symmetric group-128
+  repacked weights, and fused activation permutation metadata.
+- Added small-M/large-M W4A16 CUDA entry points and an experimental large-M
+  W4A8 entry point, plus CPU activation-quantization reference and dispatcher
+  tests.
+- Focused W4/config/API suite: `32 passed, 17 skipped`; all 17 skips require
+  CUDA and are not counted as native-kernel validation.
+- Python source compilation and `git diff --check` passed. CUDA compilation was
+  not attempted because the local machine has no CUDA toolkit/GPU.
+- A direct `python setup.py --name` metadata check was unavailable because the
+  external local interpreter does not contain `setuptools`; no dependency was
+  installed. Normal PEP 517 builds provision setuptools from `pyproject.toml`;
+  opt-in CUDA builds must use an environment that already has matching PyTorch
+  and CUDA (for example a no-build-isolation server build).
