@@ -3,8 +3,15 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from nanovllm.layers.gptq import GPTQConfig, default_g_idx
-from nanovllm.layers.gptq_kernel import gptq_w4a16_linear
+from nanovllm.layers.gptq import (
+    GPTQConfig,
+    default_g_idx,
+    repack_gptq_qweight_reference,
+)
+from nanovllm.layers.gptq_kernel import (
+    gptq_w4a16_linear,
+    repack_gptq_qweight,
+)
 
 
 def divide(numerator, denominator):
@@ -32,6 +39,8 @@ class LinearBase(nn.Module):
         self._gptq_loaded: set[tuple[str, object]] = set()
         self._g_idx_reference_shard: object | None = None
         self._gptq_symmetric_zero = False
+        self._gptq_direct_groups = False
+        self._gptq_runtime_processed = False
 
         if quant_config is None:
             self.weight = nn.Parameter(torch.empty(output_size, input_size))
@@ -84,6 +93,11 @@ class LinearBase(nn.Module):
                 param.weight_loader = self.gptq_weight_loader
 
         self.register_buffer("weight_scale", None, persistent=False)
+        self.register_buffer(
+            "gptq_input_perm",
+            torch.empty(0, dtype=torch.int32),
+            persistent=False,
+        )
         if bias:
             self.bias = nn.Parameter(torch.empty(output_size))
             self.bias.weight_loader = self.weight_loader
@@ -197,6 +211,40 @@ class LinearBase(nn.Module):
                 torch.all(self.qzeros == stored_symmetric_zero).item()
             )
 
+    def process_gptq_weights_after_loading(self):
+        """Convert checkpoint GPTQ packing to the runtime K traversal once."""
+        if not self.is_gptq or self._gptq_runtime_processed:
+            return
+        if self.quant_config.desc_act:
+            groups = self.input_size // self.quant_config.group_size
+            counts = torch.bincount(
+                self.g_idx.long(), minlength=groups
+            )
+            expected = torch.full_like(counts, self.quant_config.group_size)
+            if not torch.equal(counts.cpu(), expected.cpu()):
+                raise ValueError(
+                    "desc_act GPTQ g_idx must contain exactly group_size "
+                    "entries for every group"
+                )
+            permutation = torch.argsort(
+                self.g_idx,
+                stable=True,
+            ).to(dtype=torch.int32).contiguous()
+            if self.qweight.is_cuda:
+                repacked = repack_gptq_qweight(
+                    self.qweight.detach().contiguous(),
+                    permutation,
+                )
+            else:
+                repacked = repack_gptq_qweight_reference(
+                    self.qweight.detach().contiguous(),
+                    permutation,
+                )
+            self.qweight.data = repacked
+            self.gptq_input_perm = permutation
+        self._gptq_direct_groups = True
+        self._gptq_runtime_processed = True
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
@@ -222,6 +270,9 @@ class LinearBase(nn.Module):
                 self.g_idx,
                 bias,
                 symmetric_zero=self._gptq_symmetric_zero,
+                input_perm=self.gptq_input_perm,
+                direct_groups=self._gptq_direct_groups,
+                group_size=self.quant_config.group_size,
             )
         if self.weight_scale is None:
             return F.linear(x, self.weight, bias)

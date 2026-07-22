@@ -6,9 +6,24 @@ from nanovllm.layers.gptq import (
     GPTQ_VALUES_PER_INT32,
     dequantize_gptq_weight,
     gptq_linear_reference,
+    repack_gptq_qweight_reference,
     unpack_gptq_qweight,
     unpack_gptq_qzeros,
 )
+
+
+def test_runtime_repack_matches_logical_k_permutation():
+    torch.manual_seed(5)
+    logical = torch.randint(0, 16, (32, 13), dtype=torch.int32)
+    packed = _pack_int4(logical, dim=0)
+    permutation = torch.randperm(32, dtype=torch.int64).to(torch.int32)
+
+    repacked = repack_gptq_qweight_reference(packed, permutation)
+
+    assert torch.equal(
+        unpack_gptq_qweight(repacked),
+        logical.index_select(0, permutation.long()),
+    )
 
 
 def _pack_int4(values: torch.Tensor, dim: int) -> torch.Tensor:

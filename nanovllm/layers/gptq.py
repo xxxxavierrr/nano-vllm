@@ -119,6 +119,30 @@ def default_g_idx(
     )
 
 
+def repack_gptq_qweight_reference(
+    qweight: torch.Tensor,
+    input_perm: torch.Tensor,
+) -> torch.Tensor:
+    """CPU/test reference for K-order GPTQ repacking without BF16 weights."""
+    if qweight.dtype is not torch.int32 or qweight.ndim != 2:
+        raise TypeError("qweight must be rank-2 int32")
+    k = qweight.shape[0] * GPTQ_VALUES_PER_INT32
+    if input_perm.dtype is not torch.int32 or input_perm.shape != (k,):
+        raise TypeError("input_perm must be int32 [K]")
+    output = torch.zeros_like(qweight, dtype=torch.int64)
+    source = qweight.to(torch.int64)
+    for lane in range(GPTQ_VALUES_PER_INT32):
+        checkpoint_k = input_perm[lane::GPTQ_VALUES_PER_INT32].long()
+        checkpoint_word = source.index_select(0, checkpoint_k // 8)
+        shift = ((checkpoint_k % 8) * GPTQ_BITS).unsqueeze(1)
+        nibble = torch.bitwise_and(
+            torch.bitwise_right_shift(checkpoint_word, shift),
+            0xF,
+        )
+        output.bitwise_or_(nibble << (lane * GPTQ_BITS))
+    return output.to(torch.int32)
+
+
 def dequantize_gptq_weight(
     qweight: torch.Tensor,
     scales: torch.Tensor,

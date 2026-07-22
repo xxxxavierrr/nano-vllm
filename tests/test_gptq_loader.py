@@ -4,7 +4,7 @@ import torch.distributed as dist
 from torch import nn
 from safetensors.torch import save_file
 
-from nanovllm.layers.gptq import GPTQConfig
+from nanovllm.layers.gptq import GPTQConfig, unpack_gptq_qweight
 from nanovllm.layers.linear import MergedColumnParallelLinear, QKVParallelLinear
 from nanovllm.utils.loader import load_model
 
@@ -89,6 +89,36 @@ def test_gptq_loader_detects_packed_symmetric_zero(tmp_path):
         tensors[f"{name}.qzeros"].fill_(0x77777777)
     model = _load(tmp_path, tensors)
     assert model.qkv_proj._gptq_symmetric_zero
+
+
+def test_gptq_loader_repacks_nonmonotonic_desc_act_once(tmp_path):
+    tensors = _checkpoint_tensors()
+    permutation = torch.randperm(256)
+    shuffled_g_idx = (
+        torch.arange(256, dtype=torch.int32) // 128
+    ).index_select(0, permutation)
+    for name in ("q_proj", "k_proj", "v_proj"):
+        tensors[f"{name}.g_idx"] = shuffled_g_idx.clone()
+    checkpoint_qweight = torch.cat(
+        [
+            tensors["q_proj.qweight"],
+            tensors["k_proj.qweight"],
+            tensors["v_proj.qweight"],
+        ],
+        dim=1,
+    )
+    runtime_perm = torch.argsort(shuffled_g_idx, stable=True).to(torch.int32)
+
+    model = _load(tmp_path, tensors)
+    linear = model.qkv_proj
+
+    assert torch.equal(linear.gptq_input_perm.cpu(), runtime_perm)
+    assert torch.equal(
+        unpack_gptq_qweight(linear.qweight.cpu()),
+        unpack_gptq_qweight(checkpoint_qweight).index_select(
+            0, runtime_perm.long()
+        ),
+    )
 
 
 def test_gptq_loader_rejects_fused_g_idx_mismatch(tmp_path):

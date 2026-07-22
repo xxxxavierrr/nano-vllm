@@ -38,3 +38,4 @@ def load_model(model: nn.Module, path: str):
     for module in model.modules():
         if isinstance(module, LinearBase):
             module.validate_gptq_loaded()
+            module.process_gptq_weights_after_loading()

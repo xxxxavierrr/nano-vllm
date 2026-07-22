@@ -2,7 +2,10 @@ import pytest
 import torch
 
 from nanovllm.layers.gptq import gptq_linear_reference
-from nanovllm.layers.gptq_kernel import gptq_w4a16_linear
+from nanovllm.layers.gptq_kernel import (
+    gptq_w4a16_linear,
+    repack_gptq_qweight,
+)
 
 
 def _pack_int4(values: torch.Tensor, dim: int) -> torch.Tensor:
@@ -67,6 +70,29 @@ def test_gptq_w4a16_symmetric_zero_fast_path_matches_reference():
         g_idx,
         symmetric_zero=True,
     )
+    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_desc_act_runtime_repack_fuses_activation_permutation():
+    x, qweight, scales, qzeros, g_idx = _make_inputs(
+        19, 256, 192, desc_act=True
+    )
+    expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx)
+    permutation = torch.argsort(g_idx, stable=True).to(torch.int32)
+    runtime_qweight = repack_gptq_qweight(qweight, permutation)
+
+    actual = gptq_w4a16_linear(
+        x,
+        runtime_qweight,
+        scales,
+        qzeros,
+        g_idx,
+        input_perm=permutation,
+        direct_groups=True,
+        group_size=128,
+    )
+
     torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
