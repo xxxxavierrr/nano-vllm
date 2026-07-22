@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from nanovllm.layers.deltanet import gated_delta_recurrent_packed
+from nanovllm.layers.deltanet_chunk import gated_delta_packed
 
 
 def _reference(q, k, value, beta, decay, state):
@@ -16,7 +16,7 @@ def _reference(q, k, value, beta, decay, state):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_gated_delta_recurrent_packed_varlen_slots_match_reference():
+def test_gated_delta_packed_all_recurrent_matches_reference():
     torch.manual_seed(23)
     lengths = (1, 7, 19)
     slots = torch.tensor((2, 0, 3), device="cuda", dtype=torch.int32)
@@ -46,8 +46,20 @@ def test_gated_delta_recurrent_packed_varlen_slots_match_reference():
         )
 
     actual_state = initial_state.clone()
-    actual = gated_delta_recurrent_packed(
-        q, k, value, beta, decay, cu_seqlens, slots, actual_state
+    empty = torch.empty(0, device="cuda", dtype=torch.int32)
+    actual = gated_delta_packed(
+        q,
+        k,
+        value,
+        beta,
+        decay,
+        cu_seqlens,
+        empty.reshape(0, 2),
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        empty,
+        torch.arange(len(lengths), device="cuda", dtype=torch.int32),
+        slots,
+        actual_state,
     )
     torch.testing.assert_close(actual, torch.cat(expected_parts), rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(actual_state, expected_state, rtol=1e-4, atol=1e-4)

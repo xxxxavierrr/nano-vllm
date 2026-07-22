@@ -6,15 +6,10 @@ import json
 import torch
 import triton
 
-from nanovllm.layers.deltanet import (
-    gated_delta_recurrent,
-    gated_delta_recurrent_packed,
-)
 from nanovllm.layers.deltanet_chunk import (
     DELTA_CHUNK_MIN_TOKENS,
     DELTA_CHUNK_SIZE,
-    gated_delta_chunk,
-    gated_delta_hybrid_packed,
+    gated_delta_packed,
 )
 
 
@@ -75,6 +70,37 @@ def _make_mixed_metadata(
     )
 
 
+def _make_all_recurrent_metadata(
+    cu_seqlens: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    empty = torch.empty(0, device="cuda", dtype=torch.int32)
+    return (
+        empty.reshape(0, 2),
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        empty,
+        torch.arange(
+            cu_seqlens.numel() - 1,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+    )
+
+
+def _make_all_chunk_metadata(tokens: int) -> tuple[torch.Tensor, ...]:
+    chunks = (tokens + DELTA_CHUNK_SIZE - 1) // DELTA_CHUNK_SIZE
+    empty = torch.empty(0, device="cuda", dtype=torch.int32)
+    return (
+        torch.tensor(
+            tuple((0, chunk) for chunk in range(chunks)),
+            device="cuda",
+            dtype=torch.int32,
+        ),
+        torch.tensor((0, chunks), device="cuda", dtype=torch.int32),
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        empty,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compare nano-vLLM DeltaNet recurrent and chunk kernels."
@@ -112,11 +138,33 @@ def main() -> None:
         )
         recurrent_state = state.clone()
         chunk_state = state.clone()
-        expected = gated_delta_recurrent(
-            query, key, value, beta, decay, recurrent_state
+        cu_seqlens = torch.tensor(
+            (0, tokens), device="cuda", dtype=torch.int32
         )
-        actual = gated_delta_chunk(
-            query, key, value, beta, decay, chunk_state
+        slots = torch.zeros(1, device="cuda", dtype=torch.int32)
+        recurrent_metadata = _make_all_recurrent_metadata(cu_seqlens)
+        chunk_metadata = _make_all_chunk_metadata(tokens)
+        expected = gated_delta_packed(
+            query,
+            key,
+            value,
+            beta,
+            decay,
+            cu_seqlens,
+            *recurrent_metadata,
+            slots,
+            recurrent_state.unsqueeze(0),
+        )
+        actual = gated_delta_packed(
+            query,
+            key,
+            value,
+            beta,
+            decay,
+            cu_seqlens,
+            *chunk_metadata,
+            slots,
+            chunk_state.unsqueeze(0),
         )
         torch.cuda.synchronize()
         output_error = (
@@ -127,15 +175,31 @@ def main() -> None:
         ).abs().max().item()
 
         recurrent_ms = triton.testing.do_bench(
-            lambda: gated_delta_recurrent(
-                query, key, value, beta, decay, recurrent_state
+            lambda: gated_delta_packed(
+                query,
+                key,
+                value,
+                beta,
+                decay,
+                cu_seqlens,
+                *recurrent_metadata,
+                slots,
+                recurrent_state.unsqueeze(0),
             ),
             warmup=args.warmup,
             rep=args.rep,
         )
         chunk_ms = triton.testing.do_bench(
-            lambda: gated_delta_chunk(
-                query, key, value, beta, decay, chunk_state
+            lambda: gated_delta_packed(
+                query,
+                key,
+                value,
+                beta,
+                decay,
+                cu_seqlens,
+                *chunk_metadata,
+                slots,
+                chunk_state.unsqueeze(0),
             ),
             warmup=args.warmup,
             rep=args.rep,
@@ -178,17 +242,19 @@ def main() -> None:
             )
             recurrent_slab = state_slab.clone()
             hybrid_slab = state_slab.clone()
-            mixed_expected = gated_delta_recurrent_packed(
+            recurrent_metadata = _make_all_recurrent_metadata(cu_seqlens)
+            mixed_expected = gated_delta_packed(
                 mixed_query,
                 mixed_key,
                 mixed_value,
                 mixed_beta,
                 mixed_decay,
                 cu_seqlens,
+                *recurrent_metadata,
                 slots,
                 recurrent_slab,
             )
-            mixed_actual = gated_delta_hybrid_packed(
+            mixed_actual = gated_delta_packed(
                 mixed_query,
                 mixed_key,
                 mixed_value,
@@ -209,22 +275,23 @@ def main() -> None:
             mixed_state_error = (
                 hybrid_slab.float() - recurrent_slab.float()
             ).abs().max().item()
-            packed_recurrent_ms = triton.testing.do_bench(
-                lambda: gated_delta_recurrent_packed(
+            recurrent_partition_ms = triton.testing.do_bench(
+                lambda: gated_delta_packed(
                     mixed_query,
                     mixed_key,
                     mixed_value,
                     mixed_beta,
                     mixed_decay,
                     cu_seqlens,
+                    *recurrent_metadata,
                     slots,
                     recurrent_slab,
                 ),
                 warmup=args.warmup,
                 rep=args.rep,
             )
-            hybrid_ms = triton.testing.do_bench(
-                lambda: gated_delta_hybrid_packed(
+            mixed_partition_ms = triton.testing.do_bench(
+                lambda: gated_delta_packed(
                     mixed_query,
                     mixed_key,
                     mixed_value,
@@ -244,9 +311,11 @@ def main() -> None:
             result["mixed"] = {
                 "decode_sequences": args.mixed_decode_seqs,
                 "total_tokens": total_tokens,
-                "packed_recurrent_ms": packed_recurrent_ms,
-                "hybrid_ms": hybrid_ms,
-                "hybrid_speedup": packed_recurrent_ms / hybrid_ms,
+                "recurrent_partition_ms": recurrent_partition_ms,
+                "mixed_partition_ms": mixed_partition_ms,
+                "mixed_speedup": (
+                    recurrent_partition_ms / mixed_partition_ms
+                ),
                 "max_output_error": mixed_output_error,
                 "max_state_error": mixed_state_error,
             }

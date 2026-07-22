@@ -278,14 +278,14 @@ def main(argv: list[str] | None = None):
         seqs = batch.sequences
         scheduled_tokens = batch.total_tokens
         previous_completion_tokens = {seq.seq_id: seq.num_completion_tokens for seq in seqs}
-        llm.execute_batch(batch)
+        _, runner_metrics = llm.execute_batch(batch)
         step_finished = perf_counter()
         step_seconds = step_finished - step_started
-        execution_mode = llm.model_runner.last_execution_mode
-        step_speculative = llm.model_runner.last_speculative_stats
+        execution_mode = runner_metrics.execution_mode
+        step_speculative = runner_metrics.speculative
         for key in speculative_stats:
             runner_key = key.removesuffix("_tokens")
-            speculative_stats[key] += step_speculative[runner_key]
+            speculative_stats[key] += getattr(step_speculative, runner_key)
         mode_stats = execution_mode_stats[execution_mode]
         mode_stats["steps"] += 1
         mode_stats["seconds"] += step_seconds

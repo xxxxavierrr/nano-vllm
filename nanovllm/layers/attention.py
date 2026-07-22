@@ -76,7 +76,8 @@ class Attention(nn.Module):
     @torch.compiler.disable
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
-        num_actual_tokens = context.num_actual_tokens or q.size(0)
+        metadata = context.attention
+        num_actual_tokens = context.signature.num_tokens
         num_padded_tokens = q.size(0) - num_actual_tokens
         if num_padded_tokens < 0:
             raise ValueError("attention received fewer tokens than the unpadded batch size")
@@ -93,37 +94,37 @@ class Attention(nn.Module):
                     v_cache,
                     self.k_scale.tensor,
                     self.v_scale.tensor,
-                    context.slot_mapping,
+                    metadata.slot_mapping,
                 )
             else:
-                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        if context.use_kv_cache and k_cache.dtype == torch.float8_e4m3fn:
+                store_kvcache(k, v, k_cache, v_cache, metadata.slot_mapping)
+        if metadata.use_kv_cache and k_cache.dtype == torch.float8_e4m3fn:
             o = fp8_paged_attention(
                 q,
                 k_cache,
                 v_cache,
                 self.k_scale.tensor,
                 self.v_scale.tensor,
-                context.block_tables,
-                context.context_lens,
-                context.query_tile_seq_ids,
-                context.query_tile_starts,
-                context.query_tile_lens,
-                context.query_tile_positions,
+                metadata.block_tables,
+                metadata.context_lens,
+                metadata.query_tile_seq_ids,
+                metadata.query_tile_starts,
+                metadata.query_tile_lens,
+                metadata.query_tile_positions,
                 self.scale,
                 k_cache.shape[1],
             )
-        elif context.is_uniform_decode:
+        elif context.signature.is_single_token_decode:
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables,
+                                        cache_seqlens=metadata.context_lens, block_table=metadata.block_tables,
                                         softmax_scale=self.scale, causal=True)
         else:
-            if context.use_kv_cache:
+            if metadata.use_kv_cache:
                 k, v = k_cache, v_cache
             o = flash_attn_varlen_func(q, k, v,
-                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+                                       max_seqlen_q=metadata.max_seqlen_q, cu_seqlens_q=metadata.cu_seqlens_q,
+                                       max_seqlen_k=metadata.max_seqlen_k, cu_seqlens_k=metadata.cu_seqlens_k,
+                                       softmax_scale=self.scale, causal=True, block_table=metadata.block_tables)
         if num_padded_tokens:
             o = F.pad(o, (0, 0, 0, 0, 0, num_padded_tokens))
         return o

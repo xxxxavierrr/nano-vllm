@@ -11,26 +11,36 @@ from nanovllm.engine.cudagraph import (
 )
 
 
-def make_dispatcher(mode=CUDAGraphMode.FULL_AND_PIECEWISE):
+def make_dispatcher(
+    mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    full_query_lengths=(1, 3),
+):
     return CUDAGraphDispatcher(
         mode,
         full_capture_sizes=make_full_capture_sizes(512),
         piecewise_capture_sizes=make_piecewise_capture_sizes(512),
+        full_query_lengths=list(full_query_lengths),
     )
 
 
 def test_full_and_piecewise_dispatches_by_batch_shape():
     dispatcher = make_dispatcher()
 
-    decode = dispatcher.dispatch(num_tokens=7, num_seqs=7, uniform_decode=True)
+    decode = dispatcher.dispatch(
+        num_tokens=7, num_seqs=7, uniform_query_len=1
+    )
     assert decode.execution_mode is ExecutionMode.FULL
     assert decode.num_padded_tokens == 8
 
-    mixed = dispatcher.dispatch(num_tokens=19, num_seqs=2, uniform_decode=False)
+    mixed = dispatcher.dispatch(
+        num_tokens=19, num_seqs=2, uniform_query_len=None
+    )
     assert mixed.execution_mode is ExecutionMode.PIECEWISE
     assert mixed.num_padded_tokens == 24
 
-    oversized = dispatcher.dispatch(num_tokens=513, num_seqs=2, uniform_decode=False)
+    oversized = dispatcher.dispatch(
+        num_tokens=513, num_seqs=2, uniform_query_len=None
+    )
     assert oversized.execution_mode is ExecutionMode.EAGER
     assert oversized.num_padded_tokens == 513
 
@@ -45,8 +55,8 @@ def test_full_and_piecewise_dispatches_by_batch_shape():
 )
 def test_explicit_cudagraph_modes(mode, decode_mode, mixed_mode):
     dispatcher = make_dispatcher(mode)
-    assert dispatcher.dispatch(4, 4, True).execution_mode is decode_mode
-    assert dispatcher.dispatch(4, 2, False).execution_mode is mixed_mode
+    assert dispatcher.dispatch(4, 4, 1).execution_mode is decode_mode
+    assert dispatcher.dispatch(4, 2, None).execution_mode is mixed_mode
 
 
 def test_full_falls_back_to_piecewise_when_decode_exceeds_full_capture_range():
@@ -55,7 +65,27 @@ def test_full_falls_back_to_piecewise_when_decode_exceeds_full_capture_range():
         full_capture_sizes=make_full_capture_sizes(8),
         piecewise_capture_sizes=make_piecewise_capture_sizes(16),
     )
-    descriptor = dispatcher.dispatch(12, 12, True)
+    descriptor = dispatcher.dispatch(12, 12, 1)
+    assert descriptor.execution_mode is ExecutionMode.PIECEWISE
+    assert descriptor.num_padded_tokens == 16
+
+
+def test_uniform_speculative_shape_uses_full_request_bucket():
+    dispatcher = make_dispatcher()
+    descriptor = dispatcher.dispatch(12, 4, 3)
+
+    assert descriptor.uniform_query_len == 3
+    assert descriptor.execution_mode is ExecutionMode.FULL
+    assert descriptor.num_padded_tokens == 12
+    assert descriptor.padded_requests == 4
+    assert descriptor.full_key == (3, 4)
+    assert descriptor.signature.uniform_query_len == 3
+
+
+def test_uncaptured_uniform_query_length_falls_back_to_piecewise():
+    dispatcher = make_dispatcher(full_query_lengths=(1, 4))
+    descriptor = dispatcher.dispatch(12, 4, 3)
+
     assert descriptor.execution_mode is ExecutionMode.PIECEWISE
     assert descriptor.num_padded_tokens == 16
 

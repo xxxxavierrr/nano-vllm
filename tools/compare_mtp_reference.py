@@ -13,8 +13,14 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5TextRotaryEmbedding,
 )
 
+from nanovllm.engine.batch import (
+    AttentionMetadata,
+    ExecutionSignature,
+    PreparedBatch,
+    SamplingMetadata,
+)
 from nanovllm.models.qwen3_5_mtp import Qwen3_5MTP
-from nanovllm.utils.context import reset_context, set_context
+from nanovllm.utils.context import forward_context
 from nanovllm.utils.mtp_loader import load_mtp_model
 
 
@@ -131,19 +137,25 @@ def main():
         cu_seqlens = torch.tensor(
             [0, args.tokens], device="cuda", dtype=torch.int32
         )
-        set_context(
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=args.tokens,
-            max_seqlen_k=args.tokens,
-            use_kv_cache=False,
-            num_actual_tokens=args.tokens,
-            num_padded_tokens=args.tokens,
+        prepared = PreparedBatch(
+            input_ids=torch.zeros(
+                args.tokens, device="cuda", dtype=torch.long
+            ),
+            positions=positions,
+            signature=ExecutionSignature(
+                args.tokens, 1, args.tokens, None
+            ),
+            attention=AttentionMetadata(
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=args.tokens,
+                max_seqlen_k=args.tokens,
+                use_kv_cache=False,
+            ),
+            sampling=SamplingMetadata(),
         )
-        try:
+        with forward_context(prepared):
             actual = nano_model(positions, target_hidden, token_embeddings)
-        finally:
-            reset_context()
         expected = reference(positions, target_hidden, token_embeddings)
 
         actual_float = actual.float()
@@ -163,7 +175,6 @@ def main():
                 "nano-vLLM MTP exceeds the BF16 reference tolerance"
             )
     finally:
-        reset_context()
         torch.set_default_device(old_device)
         torch.set_default_dtype(old_dtype)
         if dist.is_initialized():

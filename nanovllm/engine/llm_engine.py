@@ -102,7 +102,8 @@ class LLMEngine:
             self.model_runner.call(
                 "release_sequences", batch.reset_sequence_ids
             )
-        result = self.model_runner.call("run", batch.sequences)
+        runner_output = self.model_runner.call("run", batch.sequences)
+        result = runner_output.result
         if isinstance(result, SpeculativeBatchOutput):
             self.scheduler.postprocess(
                 batch,
@@ -119,14 +120,14 @@ class LLMEngine:
         )
         if finished_ids:
             self.model_runner.call("release_sequences", finished_ids)
-        return token_ids
+        return token_ids, runner_output.metrics
 
     def step(self):
         batch = self.scheduler.schedule()
         previous_lengths = {
             seq.seq_id: seq.num_tokens for seq in batch.sequences
         }
-        self.execute_batch(batch)
+        _, runner_metrics = self.execute_batch(batch)
         outputs = []
         for seq in batch.sequences:
             new_tokens = seq.token_ids[previous_lengths[seq.seq_id] :]
@@ -141,28 +142,20 @@ class LLMEngine:
                         seq.num_prefix_cached_tokens,
                     )
                 )
-        speculative = self.model_runner.last_speculative_stats
+        speculative = runner_metrics.speculative
         return outputs, EngineStepStats(
             batch.prefill_tokens,
             batch.decode_tokens,
-            self.model_runner.last_execution_mode,
-            speculative_drafted_tokens=speculative["drafted"],
-            speculative_proposed_tokens=speculative["proposed"],
-            speculative_accepted_tokens=speculative["accepted"],
-            speculative_rejected_tokens=speculative["rejected"],
-            speculative_bonus_tokens=speculative["bonus"],
-            speculative_verification_rounds=speculative[
-                "verification_rounds"
-            ],
-            speculative_accepted_position_1=speculative[
-                "accepted_position_1"
-            ],
-            speculative_accepted_position_2=speculative[
-                "accepted_position_2"
-            ],
-            speculative_accepted_position_3=speculative[
-                "accepted_position_3"
-            ],
+            runner_metrics.execution_mode,
+            speculative_drafted_tokens=speculative.drafted,
+            speculative_proposed_tokens=speculative.proposed,
+            speculative_accepted_tokens=speculative.accepted,
+            speculative_rejected_tokens=speculative.rejected,
+            speculative_bonus_tokens=speculative.bonus,
+            speculative_verification_rounds=speculative.verification_rounds,
+            speculative_accepted_position_1=speculative.accepted_position_1,
+            speculative_accepted_position_2=speculative.accepted_position_2,
+            speculative_accepted_position_3=speculative.accepted_position_3,
         )
 
     def is_finished(self):

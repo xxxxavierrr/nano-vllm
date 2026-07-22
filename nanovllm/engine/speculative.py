@@ -20,3 +20,14 @@ def greedy_accept_k1(
 ) -> tuple[list[int], int]:
     """Backward-compatible k=1 wrapper."""
     return greedy_accept(target_token_ids, [draft_token_id])
+
+
+class GreedyAcceptance:
+    """Exact-prefix acceptance policy for deterministic target sampling."""
+
+    @staticmethod
+    def accept(
+        target_token_ids: list[int],
+        draft_token_ids: list[int],
+    ) -> tuple[list[int], int]:
+        return greedy_accept(target_token_ids, draft_token_ids)

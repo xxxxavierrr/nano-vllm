@@ -1,4 +1,5 @@
 import math
+import weakref
 
 import torch
 from torch import nn
@@ -7,14 +8,8 @@ import torch.distributed as dist
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
-from nanovllm.layers.deltanet import (
-    gated_delta_recurrent,
-    gated_delta_recurrent_packed,
-)
-from nanovllm.layers.deltanet_chunk import (
-    DELTA_CHUNK_MIN_TOKENS,
-    gated_delta_hybrid_packed,
-)
+from nanovllm.layers.deltanet import packed_causal_conv1d
+from nanovllm.layers.deltanet_chunk import gated_delta_packed
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.layers.gptq import GPTQConfig
 from nanovllm.layers.linear import (
@@ -24,6 +19,36 @@ from nanovllm.layers.linear import (
 )
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.utils.context import get_context
+
+
+_GDN_LAYERS = weakref.WeakValueDictionary()
+
+
+@torch.library.custom_op(
+    "nanovllm::qwen_gdn_core",
+    mutates_args={"core_output"},
+)
+def _qwen_gdn_core(
+    projected_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_output: torch.Tensor,
+    layer_id: int,
+) -> None:
+    """Opaque stateful GDN core; projections and output remain compilable."""
+    layer = _GDN_LAYERS[layer_id]
+    layer._forward_core(projected_qkv, b, a, core_output)
+
+
+@_qwen_gdn_core.register_fake
+def _qwen_gdn_core_fake(
+    projected_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_output: torch.Tensor,
+    layer_id: int,
+) -> None:
+    return None
 
 
 class Qwen3_5RMSNorm(nn.Module):
@@ -106,6 +131,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.layer_idx = layer_idx
         self.state_idx = state_idx
+        self._core_op_id = id(self)
+        _GDN_LAYERS[self._core_op_id] = self
 
         self.conv1d = nn.Conv1d(
             self.conv_dim,
@@ -125,111 +152,25 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             bias=False,
             quant_config=quant_config,
         )
-        self.in_proj_qkv = ReplicatedLinear(
+        self.in_proj_qkvz = MergedColumnParallelLinear(
             self.hidden_size,
-            self.conv_dim,
+            [self.conv_dim, self.value_dim],
             bias=False,
             quant_config=quant_config,
         )
-        self.in_proj_z = ReplicatedLinear(
+        self.in_proj_ba = MergedColumnParallelLinear(
             self.hidden_size,
-            self.value_dim,
-            bias=False,
-            quant_config=quant_config,
-        )
-        self.in_proj_b = ReplicatedLinear(
-            self.hidden_size,
-            self.num_v_heads,
-            bias=False,
-            quant_config=None,
-        )
-        self.in_proj_a = ReplicatedLinear(
-            self.hidden_size,
-            self.num_v_heads,
+            [self.num_v_heads, self.num_v_heads],
             bias=False,
             quant_config=None,
         )
 
-    def _transient_state(self, device, dtype):
-        conv = torch.zeros(
-            self.state_idx + 1,
-            self.conv_dim,
-            self.conv_kernel_size,
-            device=device,
-            dtype=dtype,
-        )
-        recurrent = torch.zeros(
-            self.state_idx + 1,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            device=device,
-            dtype=torch.float32,
-        )
-        return conv, recurrent
-
-    def _forward_sequence(
+    def _forward_packed_core(
         self,
-        hidden_states: torch.Tensor,
-        state: tuple[torch.Tensor, torch.Tensor],
-    ) -> torch.Tensor:
-        seq_len = hidden_states.size(0)
-        conv_states, recurrent_states = state
-        conv_state = conv_states[self.state_idx]
-        recurrent_state = recurrent_states[self.state_idx]
-
-        mixed_qkv = self.in_proj_qkv(hidden_states).transpose(0, 1)
-        z = self.in_proj_z(hidden_states).view(
-            seq_len, self.num_v_heads, self.head_v_dim
-        )
-        beta = self.in_proj_b(hidden_states).sigmoid()
-        a = self.in_proj_a(hidden_states)
-
-        conv_input = torch.cat((conv_state, mixed_qkv), dim=-1)
-        conv_state.copy_(conv_input[:, -self.conv_kernel_size :])
-        mixed_qkv = F.conv1d(
-            conv_input.unsqueeze(0),
-            self.conv1d.weight,
-            bias=None,
-            groups=self.conv_dim,
-        )[0, :, -seq_len:]
-        mixed_qkv = F.silu(mixed_qkv.transpose(0, 1))
-
-        query, key, value = mixed_qkv.split(
-            [self.key_dim, self.key_dim, self.value_dim], dim=-1
-        )
-        query = query.view(seq_len, self.num_k_heads, self.head_k_dim)
-        key = key.view(seq_len, self.num_k_heads, self.head_k_dim)
-        value = value.view(seq_len, self.num_v_heads, self.head_v_dim)
-        if self.num_v_heads != self.num_k_heads:
-            repeats = self.num_v_heads // self.num_k_heads
-            query = query.repeat_interleave(repeats, dim=1)
-            key = key.repeat_interleave(repeats, dim=1)
-        query = _l2norm(query) / math.sqrt(self.head_k_dim)
-        key = _l2norm(key)
-        value = value.float()
-        decay = (
-            -self.A_log.float().exp()
-            * F.softplus(a.float() + self.dt_bias.float())
-        ).exp()
-
-        core = gated_delta_recurrent(
-            query,
-            key,
-            value,
-            beta.float(),
-            decay,
-            recurrent_state,
-        ).to(hidden_states.dtype)
-        core = self.norm(core, z)
-        return self.out_proj(core.reshape(seq_len, self.value_dim))
-
-    def _forward_packed(
-        self,
-        hidden_states: torch.Tensor,
-        states: tuple[tuple[torch.Tensor, torch.Tensor], ...],
-        conv_state_slab: torch.Tensor | None,
-        slices: tuple[tuple[int, int], ...],
+        projected_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        conv_state_slab: torch.Tensor,
         cu_seqlens: torch.Tensor,
         chunk_indices: torch.Tensor,
         cu_chunks: torch.Tensor,
@@ -238,59 +179,16 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         state_slots: torch.Tensor,
         recurrent_state_slab: torch.Tensor,
         max_seqlen_q: int,
-        uniform_decode: bool,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
-        projected_qkv = self.in_proj_qkv(hidden_states)
-        z = self.in_proj_z(hidden_states).view(
-            num_tokens, self.num_v_heads, self.head_v_dim
+        num_tokens = projected_qkv.size(0)
+        mixed_qkv = packed_causal_conv1d(
+            projected_qkv.contiguous(),
+            self.conv1d.weight,
+            cu_seqlens,
+            state_slots,
+            conv_state_slab,
+            max_seqlen_q,
         )
-        beta = self.in_proj_b(hidden_states).sigmoid()
-        a = self.in_proj_a(hidden_states)
-
-        if uniform_decode:
-            if conv_state_slab is None:
-                raise ValueError("uniform DeltaNet requires a convolution state slab")
-            num_sequences = state_slots.numel()
-            if num_tokens != num_sequences * max_seqlen_q:
-                raise ValueError("uniform DeltaNet token shape is inconsistent")
-            state_indices = state_slots.long()
-            conv_state = conv_state_slab[self.state_idx].index_select(
-                0, state_indices
-            )
-            mixed_qkv = projected_qkv.view(
-                num_sequences, max_seqlen_q, self.conv_dim
-            ).transpose(1, 2)
-            conv_input = torch.cat((conv_state, mixed_qkv), dim=-1)
-            conv_state_slab[self.state_idx].index_copy_(
-                0,
-                state_indices,
-                conv_input[:, :, -self.conv_kernel_size :],
-            )
-            convolved = F.conv1d(
-                conv_input,
-                self.conv1d.weight,
-                bias=None,
-                groups=self.conv_dim,
-            )[:, :, -max_seqlen_q:]
-            mixed_qkv = F.silu(convolved.transpose(1, 2)).reshape(
-                num_tokens, self.conv_dim
-            )
-        else:
-            conv_outputs = []
-            for (start, end), state in zip(slices, states):
-                conv_state = state[0][self.state_idx]
-                mixed_qkv = projected_qkv[start:end].transpose(0, 1)
-                conv_input = torch.cat((conv_state, mixed_qkv), dim=-1)
-                conv_state.copy_(conv_input[:, -self.conv_kernel_size :])
-                convolved = F.conv1d(
-                    conv_input.unsqueeze(0),
-                    self.conv1d.weight,
-                    bias=None,
-                    groups=self.conv_dim,
-                )[0, :, -(end - start) :]
-                conv_outputs.append(F.silu(convolved.transpose(0, 1)))
-            mixed_qkv = torch.cat(conv_outputs, dim=0)
 
         query, key, value = mixed_qkv.split(
             [self.key_dim, self.key_dim, self.value_dim], dim=-1
@@ -309,91 +207,88 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             -self.A_log.float().exp()
             * F.softplus(a.float() + self.dt_bias.float())
         ).exp()
+        beta = b.float().sigmoid()
 
-        if max_seqlen_q >= DELTA_CHUNK_MIN_TOKENS:
-            core = gated_delta_hybrid_packed(
-                query,
-                key,
-                value,
-                beta.float(),
-                decay,
-                cu_seqlens,
-                chunk_indices,
-                cu_chunks,
-                chunk_sequences,
-                recurrent_sequences,
-                state_slots,
-                recurrent_state_slab,
-            )
-        else:
-            core = gated_delta_recurrent_packed(
-                query,
-                key,
-                value,
-                beta.float(),
-                decay,
-                cu_seqlens,
-                state_slots,
-                recurrent_state_slab,
-            )
-        core = core.to(hidden_states.dtype)
+        core = gated_delta_packed(
+            query,
+            key,
+            value,
+            beta.float(),
+            decay,
+            cu_seqlens,
+            chunk_indices,
+            cu_chunks,
+            chunk_sequences,
+            recurrent_sequences,
+            state_slots,
+            recurrent_state_slab,
+        )
+        return core.to(projected_qkv.dtype)
+
+    def _forward_core(
+        self,
+        projected_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_output: torch.Tensor,
+    ) -> None:
+        context = get_context()
+        metadata = context.gdn
+        if metadata is None:
+            raise ValueError("Qwen GDN execution requires prepared GDN metadata")
+        num_actual_tokens = context.signature.num_tokens
+        projected_qkv = projected_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+        output = self._forward_packed_core(
+            projected_qkv,
+            b,
+            a,
+            metadata.conv_slab[self.state_idx],
+            metadata.cu_seqlens,
+            metadata.chunk_indices,
+            metadata.cu_chunks,
+            metadata.chunk_sequences,
+            metadata.recurrent_sequences,
+            metadata.state_slots,
+            metadata.recurrent_slab[self.state_idx],
+            context.attention.max_seqlen_q,
+        )
+        core_output[:num_actual_tokens].copy_(output)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Projection -> opaque stateful GDN core -> output projection."""
+        num_tokens = hidden_states.size(0)
+        mixed_qkvz = self.in_proj_qkvz(hidden_states)
+        ba = self.in_proj_ba(hidden_states)
+        projected_qkv, z = mixed_qkvz.split(
+            [self.conv_dim, self.value_dim],
+            dim=-1,
+        )
+        z = z.view(
+            num_tokens,
+            self.num_v_heads,
+            self.head_v_dim,
+        )
+        b, a = ba.chunk(2, dim=-1)
+        b = b.contiguous()
+        a = a.contiguous()
+        core = torch.zeros(
+            num_tokens,
+            self.num_v_heads,
+            self.head_v_dim,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        torch.ops.nanovllm.qwen_gdn_core(
+            projected_qkv,
+            b,
+            a,
+            core,
+            self._core_op_id,
+        )
         core = self.norm(core, z)
         return self.out_proj(core.reshape(num_tokens, self.value_dim))
-
-    @torch.compiler.disable
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        context = get_context()
-        num_actual_tokens = context.num_actual_tokens or hidden_states.size(0)
-        real_hidden_states = hidden_states[:num_actual_tokens]
-        slices = context.sequence_slices or ((0, num_actual_tokens),)
-        states = context.delta_states
-        graph_safe_uniform = (
-            context.is_uniform_decode and context.delta_conv_slab is not None
-        )
-        if not states and not graph_safe_uniform:
-            states = tuple(
-                self._transient_state(hidden_states.device, hidden_states.dtype)
-                for _ in slices
-            )
-        if not graph_safe_uniform and len(states) != len(slices):
-            raise ValueError("DeltaNet state count does not match packed sequences")
-
-        if context.delta_recurrent_slab is not None:
-            if (
-                context.delta_state_slots is None
-                or context.cu_seqlens_q is None
-                or context.delta_chunk_indices is None
-                or context.delta_cu_chunks is None
-                or context.delta_chunk_sequences is None
-                or context.delta_recurrent_sequences is None
-            ):
-                raise ValueError("packed DeltaNet metadata is incomplete")
-            output = self._forward_packed(
-                real_hidden_states,
-                states,
-                context.delta_conv_slab,
-                slices,
-                context.cu_seqlens_q,
-                context.delta_chunk_indices,
-                context.delta_cu_chunks,
-                context.delta_chunk_sequences,
-                context.delta_recurrent_sequences,
-                context.delta_state_slots,
-                context.delta_recurrent_slab[self.state_idx],
-                context.max_seqlen_q,
-                context.is_uniform_decode,
-            )
-        else:
-            outputs = [
-                self._forward_sequence(real_hidden_states[start:end], state)
-                for (start, end), state in zip(slices, states)
-            ]
-            output = torch.cat(outputs, dim=0)
-        if hidden_states.size(0) != num_actual_tokens:
-            output = F.pad(
-                output, (0, 0, 0, hidden_states.size(0) - num_actual_tokens)
-            )
-        return output
 
 
 class Qwen3_5Attention(nn.Module):
@@ -618,6 +513,10 @@ class Qwen3_5ForConditionalGeneration(nn.Module):
         "v_proj": ("qkv_proj", 2),
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
+        "in_proj_qkv": ("in_proj_qkvz", 0),
+        "in_proj_z": ("in_proj_qkvz", 1),
+        "in_proj_b": ("in_proj_ba", 0),
+        "in_proj_a": ("in_proj_ba", 1),
     }
     skipped_weight_prefixes = ("model.visual.", "mtp.")
 

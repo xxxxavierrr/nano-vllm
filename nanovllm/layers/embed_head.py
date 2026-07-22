@@ -55,8 +55,9 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def forward(self, x: torch.Tensor):
         context = get_context()
-        if context.logits_indices is not None:
-            x = x.index_select(0, context.logits_indices)
+        logits_indices = context.sampling.logits_indices
+        if logits_indices is not None:
+            x = x.index_select(0, logits_indices)
         logits = F.linear(x, self.weight)
         if self.tp_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None

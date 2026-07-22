@@ -1,8 +1,14 @@
 import torch
 
 import nanovllm.layers.attention as attention_module
+from nanovllm.engine.batch import (
+    AttentionMetadata,
+    ExecutionSignature,
+    PreparedBatch,
+    SamplingMetadata,
+)
 from nanovllm.layers.attention import Attention
-from nanovllm.utils.context import reset_context, set_context
+from nanovllm.utils.context import forward_context
 
 
 def test_attention_only_consumes_real_tokens_and_restores_padding(monkeypatch):
@@ -23,19 +29,21 @@ def test_attention_only_consumes_real_tokens_and_restores_padding(monkeypatch):
     q = torch.arange(8, dtype=torch.float32).view(4, 1, 2)
     k = q + 10
     v = q + 20
-    set_context(
-        cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int32),
-        cu_seqlens_k=torch.tensor([0, 3], dtype=torch.int32),
-        slot_mapping=torch.tensor([0, 1, 2], dtype=torch.int32),
-        max_seqlen_q=3,
-        max_seqlen_k=3,
-        num_actual_tokens=3,
-        num_padded_tokens=4,
+    prepared = PreparedBatch(
+        input_ids=torch.zeros(4, dtype=torch.long),
+        positions=torch.zeros(4, dtype=torch.long),
+        signature=ExecutionSignature(3, 1, 4, None),
+        attention=AttentionMetadata(
+            cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int32),
+            cu_seqlens_k=torch.tensor([0, 3], dtype=torch.int32),
+            slot_mapping=torch.tensor([0, 1, 2], dtype=torch.int32),
+            max_seqlen_q=3,
+            max_seqlen_k=3,
+        ),
+        sampling=SamplingMetadata(),
     )
-    try:
+    with forward_context(prepared):
         output = attention(q, k, v)
-    finally:
-        reset_context()
 
     assert stored_tokens == [(3, 3, 3)]
     assert output.shape == q.shape

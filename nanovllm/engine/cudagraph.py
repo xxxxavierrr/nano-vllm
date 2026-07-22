@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from nanovllm.engine.batch import ExecutionSignature
+
 
 class CUDAGraphMode(str, Enum):
     FULL_AND_PIECEWISE = "FULL_AND_PIECEWISE"
@@ -38,8 +40,43 @@ class BatchDescriptor:
     num_tokens: int
     num_padded_tokens: int
     num_seqs: int
-    uniform_decode: bool
+    uniform_query_len: int | None
     execution_mode: ExecutionMode
+
+    def __post_init__(self) -> None:
+        ExecutionSignature(
+            num_tokens=self.num_tokens,
+            num_requests=self.num_seqs,
+            num_padded_tokens=self.num_padded_tokens,
+            uniform_query_len=self.uniform_query_len,
+        )
+
+    @property
+    def signature(self) -> ExecutionSignature:
+        return ExecutionSignature(
+            num_tokens=self.num_tokens,
+            num_requests=self.num_seqs,
+            num_padded_tokens=self.num_padded_tokens,
+            uniform_query_len=self.uniform_query_len,
+        )
+
+    @property
+    def padded_requests(self) -> int:
+        if self.uniform_query_len is None:
+            raise ValueError("non-uniform execution has no request padding key")
+        quotient, remainder = divmod(
+            self.num_padded_tokens,
+            self.uniform_query_len,
+        )
+        if remainder:
+            raise ValueError("padded tokens are not divisible by query length")
+        return quotient
+
+    @property
+    def full_key(self) -> tuple[int, int]:
+        if self.execution_mode is not ExecutionMode.FULL:
+            raise ValueError("only Full execution descriptors have a Full key")
+        return self.uniform_query_len, self.padded_requests
 
 
 def make_piecewise_capture_sizes(max_tokens: int) -> list[int]:
@@ -92,10 +129,14 @@ class CUDAGraphDispatcher:
         mode: CUDAGraphMode | str,
         full_capture_sizes: list[int],
         piecewise_capture_sizes: list[int],
+        full_query_lengths: list[int] | None = None,
     ):
         self.mode = CUDAGraphMode.parse(mode)
         self.full_capture_sizes = sorted(set(full_capture_sizes))
         self.piecewise_capture_sizes = sorted(set(piecewise_capture_sizes))
+        self.full_query_lengths = sorted(set(full_query_lengths or [1]))
+        if not self.full_query_lengths or self.full_query_lengths[0] <= 0:
+            raise ValueError("Full Graph query lengths must be positive")
 
     @staticmethod
     def _find_bucket(num_tokens: int, sizes: list[int]) -> int | None:
@@ -105,19 +146,26 @@ class CUDAGraphDispatcher:
         self,
         num_tokens: int,
         num_seqs: int,
-        uniform_decode: bool,
+        uniform_query_len: int | None,
     ) -> BatchDescriptor:
         if num_tokens <= 0 or num_seqs <= 0:
             raise ValueError("a CUDA Graph batch must contain tokens and sequences")
 
-        if uniform_decode and self.mode.uses_full:
-            bucket = self._find_bucket(num_tokens, self.full_capture_sizes)
+        if (
+            uniform_query_len in self.full_query_lengths
+            and self.mode.uses_full
+        ):
+            if num_tokens != num_seqs * uniform_query_len:
+                raise ValueError(
+                    "uniform query length does not match tokens and requests"
+                )
+            bucket = self._find_bucket(num_seqs, self.full_capture_sizes)
             if bucket is not None:
                 return BatchDescriptor(
                     num_tokens,
-                    bucket,
+                    bucket * uniform_query_len,
                     num_seqs,
-                    uniform_decode,
+                    uniform_query_len,
                     ExecutionMode.FULL,
                 )
 
@@ -128,7 +176,7 @@ class CUDAGraphDispatcher:
                     num_tokens,
                     bucket,
                     num_seqs,
-                    uniform_decode,
+                    uniform_query_len,
                     ExecutionMode.PIECEWISE,
                 )
 
@@ -136,6 +184,6 @@ class CUDAGraphDispatcher:
             num_tokens,
             num_tokens,
             num_seqs,
-            uniform_decode,
+            uniform_query_len,
             ExecutionMode.EAGER,
         )
