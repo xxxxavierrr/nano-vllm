@@ -53,6 +53,12 @@ def _run(args, kv_cache_dtype):
             "warmup_seconds": warmup_seconds,
             "generation_seconds": generation_seconds,
             "kv_cache_bytes_per_block": config.kvcache_block_bytes,
+            "kv_cache_payload_bytes_per_block": config.kvcache_payload_bytes,
+            "kv_cache_scale_bytes_per_block": config.kvcache_scale_bytes,
+            "kv_cache_scale_overhead_ratio": (
+                config.kvcache_scale_bytes / config.kvcache_block_bytes
+                if config.kvcache_block_bytes else 0.0
+            ),
             "kv_cache_blocks": config.num_kvcache_blocks,
             "kv_cache_token_capacity": capacity,
             "outputs": [

@@ -102,3 +102,27 @@ def test_sequence_transport_preserves_temperature_and_seed():
 
     assert restored.temperature == 0.75
     assert restored.seed == 123
+
+
+def test_randomized_rejection_sampling_preserves_prefix_contract():
+    for seed in range(50):
+        generator = torch.Generator().manual_seed(seed)
+        drafts = 1 + seed % 3
+        vocab = 2 + seed % 11
+        target_logits = torch.randn(drafts + 1, vocab, generator=generator)
+        draft_logits = torch.randn(drafts, vocab, generator=generator)
+        draft_ids = [
+            sample_from_logits(row, 0.7, generator=generator)
+            for row in draft_logits
+        ]
+        outputs, accepted = RejectionSamplingAcceptance.accept(
+            target_logits,
+            draft_logits,
+            draft_ids,
+            0.7,
+            generator=generator,
+        )
+        assert 0 <= accepted <= drafts
+        assert outputs[:accepted] == draft_ids[:accepted]
+        assert len(outputs) == accepted + 1
+        assert all(0 <= token < vocab for token in outputs)

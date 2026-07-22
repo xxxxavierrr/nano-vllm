@@ -475,6 +475,11 @@ def main(argv: list[str] | None = None):
         },
         "speculative": {
             **speculative_stats,
+            "rejected_prefix_target_replays": (
+                llm.model_runner.hybrid_state.rejected_prefix_target_replays
+            ),
+            "state_branch_commits": llm.model_runner.hybrid_state.branch_commits,
+            "state_branch_discards": llm.model_runner.hybrid_state.branch_discards,
             "acceptance_rate": (
                 speculative_stats["accepted_tokens"]
                 / speculative_stats["proposed_tokens"]
@@ -533,6 +538,11 @@ def main(argv: list[str] | None = None):
             "kv_cache_bytes_per_block": config.kvcache_block_bytes,
             "kv_cache_blocks": config.num_kvcache_blocks,
             "kv_cache_token_capacity": config.num_kvcache_blocks * config.kvcache_block_size,
+            "kv_cache_scale_overhead_ratio": (
+                config.kvcache_scale_bytes / config.kvcache_block_bytes
+                if config.kvcache_block_bytes
+                else 0.0
+            ),
             "delta_state_per_request_mib": (
                 model.delta_state_bytes(config.hf_config.dtype) / 2**20
                 if hasattr(model, "delta_state_bytes") else 0.0

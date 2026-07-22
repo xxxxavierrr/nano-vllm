@@ -25,6 +25,7 @@ from nanovllm.engine.cudagraph import (
     make_piecewise_capture_sizes,
 )
 from nanovllm.engine.hybrid_state import HybridStateManager
+from nanovllm.engine.kv_capacity import make_kv_cache_layout
 from nanovllm.engine.metrics import (
     RunnerStepMetrics,
     RunnerStepOutput,
@@ -411,33 +412,22 @@ class ModelRunner:
             if use_fp8_kv
             else str(cache_dtype).removeprefix("torch.")
         )
-        target_payload_bytes = (
-            2
-            * num_attention_layers
-            * self.block_size
-            * num_kv_heads
-            * head_dim
-            * cache_dtype.itemsize
+        layout = make_kv_cache_layout(
+            kv_cache_dtype=config.kv_cache_dtype,
+            target_layers=num_attention_layers,
+            mtp_layers=len(mtp_attention_modules),
+            block_size=self.block_size,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            activation_bytes=torch.tensor([], dtype=hf_config.dtype).element_size(),
+            native_dtype=str(hf_config.dtype).removeprefix("torch."),
         )
-        scale_bytes = (
-            2
-            * num_attention_layers
-            * self.block_size
-            * num_kv_heads
-            * torch.tensor([], dtype=torch.float16).element_size()
-            if use_fp8_kv
-            else 0
+        mtp_payload_bytes = layout.mtp_payload_bytes_per_block
+        scale_bytes = layout.scale_bytes_per_block
+        payload_bytes = (
+            layout.target_payload_bytes_per_block + mtp_payload_bytes
         )
-        mtp_payload_bytes = (
-            2
-            * len(mtp_attention_modules)
-            * self.block_size
-            * num_kv_heads
-            * head_dim
-            * torch.tensor([], dtype=hf_config.dtype).element_size()
-        )
-        payload_bytes = target_payload_bytes + mtp_payload_bytes
-        block_bytes = payload_bytes + scale_bytes
+        block_bytes = layout.total_bytes_per_block
         config.kvcache_payload_bytes = payload_bytes
         config.kvcache_scale_bytes = scale_bytes
         config.kvcache_block_bytes = block_bytes
@@ -549,9 +539,7 @@ class ModelRunner:
                 module.v_cache.tensor = self.mtp_kv_cache[1, layer_id]
 
         if self.rank == 0:
-            scale_mode = (
-                "per_token_per_kv_head" if use_fp8_kv else "none"
-            )
+            scale_mode = layout.scale_mode
             print(
                 "KV cache: "
                 f"requested_dtype={config.kv_cache_dtype}, "

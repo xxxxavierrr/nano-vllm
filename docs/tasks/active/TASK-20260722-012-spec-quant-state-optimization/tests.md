@@ -97,6 +97,11 @@ Implemented local evidence:
   and reconstruction, sharded checkpoint index/config, dry-run projection, and
   a generated linear loaded by the production GPTQ loader (`20 passed, 1 CUDA
   skipped` with GPTQ regressions).
+- State/sampler/KV strengthening covers atomic multi-request prefix selection,
+  exact branch request sets, zero replay instrumentation, 50 randomized
+  sampler shapes, FP8 scale overhead, theoretical 1.984x head-dim-256 target
+  KV compression, and reduced combined gain when native MTP KV remains BF16
+  (`31 passed, 9 CUDA skipped`).
 
 Deferred evidence:
 

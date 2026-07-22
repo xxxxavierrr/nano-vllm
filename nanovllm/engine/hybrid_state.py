@@ -34,6 +34,9 @@ class HybridStateManager:
         self.branch_slots_per_sequence = 0
         self.max_active = 0
         self.max_reserved_branches = 0
+        self.branch_commits = 0
+        self.branch_discards = 0
+        self.rejected_prefix_target_replays = 0
 
     def allocate(
         self,
@@ -68,6 +71,9 @@ class HybridStateManager:
         self.slots.clear()
         self.branches.clear()
         self.free_slots = list(range(self.total_slot_capacity - 1, -1, -1))
+        self.branch_commits = 0
+        self.branch_discards = 0
+        self.rejected_prefix_target_replays = 0
 
     @property
     def working(self) -> None:
@@ -214,17 +220,23 @@ class HybridStateManager:
 
     def commit_branches(self, accepted_inputs: Mapping[int, int]) -> None:
         """Commit candidate state after the selected scheduled-input prefix."""
-        for seq_id, branch in tuple(self.branches.items()):
-            selected_inputs = accepted_inputs.get(seq_id)
-            if selected_inputs is None:
-                raise ValueError(
-                    f"missing accepted input count for sequence {seq_id}"
-                )
+        expected = set(self.branches)
+        provided = set(accepted_inputs)
+        if expected != provided:
+            raise ValueError(
+                "accepted input mapping differs from active branches: "
+                f"missing={sorted(expected - provided)}, "
+                f"unknown={sorted(provided - expected)}"
+            )
+        for seq_id, branch in self.branches.items():
+            selected_inputs = accepted_inputs[seq_id]
             if not 1 <= selected_inputs <= len(branch):
                 raise ValueError(
                     f"accepted input count {selected_inputs} is outside "
                     f"[1, {len(branch)}] for sequence {seq_id}"
                 )
+        for seq_id, branch in tuple(self.branches.items()):
+            selected_inputs = accepted_inputs[seq_id]
             selected = branch[selected_inputs - 1]
             old = self.slots[seq_id]
             self.slots[seq_id] = selected
@@ -232,13 +244,16 @@ class HybridStateManager:
             self.free_slots.extend(
                 slot for slot in branch if slot != selected
             )
+            self.branch_discards += len(branch) - 1
             del self.branches[seq_id]
+            self.branch_commits += 1
 
     def discard_branches(self, seq_ids: Iterable[int] | None = None) -> None:
         ids = tuple(self.branches) if seq_ids is None else tuple(seq_ids)
         for seq_id in ids:
             branch = self.branches.pop(seq_id, ())
             self.free_slots.extend(branch)
+            self.branch_discards += len(branch)
 
     def dummy_slots(self, count: int) -> list[int]:
         if count < 0:

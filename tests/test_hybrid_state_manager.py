@@ -104,3 +104,42 @@ def test_dummy_slots_do_not_allocate_request_ownership():
     dummy = manager.dummy_slots(2)
     assert dummy == [2, 1]
     assert manager.slots == {10: 0}
+
+
+def test_multi_request_prefix_commit_is_atomic_and_never_replays_target():
+    manager = HybridStateManager(FakeHybridModel(), torch.float32)
+    manager.allocate(2, device="cpu", branch_slots_per_sequence=3)
+    manager.get(10)
+    manager.get(11)
+    transaction = manager.transaction({10: 3, 11: 3}, enabled=True)
+    transaction.begin()
+    candidates = dict(manager.branches)
+    for seq_id, slots in candidates.items():
+        for prefix, slot in enumerate(slots, start=1):
+            manager.committed[0][:, slot].fill_(seq_id + prefix)
+            manager.committed[1][:, slot].fill_(seq_id + prefix)
+
+    slots_before = dict(manager.slots)
+    branches_before = dict(manager.branches)
+    with pytest.raises(ValueError, match="outside"):
+        transaction.commit({10: 2, 11: 4})
+    assert manager.slots == slots_before
+    assert manager.branches == branches_before
+
+    transaction.commit({10: 1, 11: 3})
+    assert torch.all(manager.get(10)[0] == 11)
+    assert torch.all(manager.get(11)[0] == 14)
+    assert manager.branch_commits == 2
+    assert manager.branch_discards == 4
+    assert manager.rejected_prefix_target_replays == 0
+
+
+def test_prefix_commit_requires_exact_request_mapping():
+    manager = HybridStateManager(FakeHybridModel(), torch.float32)
+    manager.allocate(2, device="cpu", branch_slots_per_sequence=2)
+    manager.get(10)
+    manager.get(11)
+    manager.reserve_branches({10: 2, 11: 2})
+    with pytest.raises(ValueError, match=r"missing=\[11\]"):
+        manager.commit_branches({10: 1})
+    assert set(manager.branches) == {10, 11}

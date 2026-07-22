@@ -20,6 +20,9 @@
   sharded group-128 checkpoint in the production loader's packed format. Only
   a synthetic model has been exercised locally; real checkpoint compatibility
   and acceptance remain pending.
+- Speculative state reports now expose branch commits/discards and prove the
+  production target-replay count remains zero; the shared KV capacity model
+  reports payload, scale overhead, MTP bytes, blocks, and tokens consistently.
 
 GPU validation, kernel implementation, real DSpark calibration, and FP8
 DeltaNet state work remain active and are not claimed complete.

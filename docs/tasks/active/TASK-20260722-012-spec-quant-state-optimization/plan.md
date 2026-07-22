@@ -36,7 +36,7 @@
 - [ ] Record the first runnable paired-AWQ-target + INT4-draft baseline,
   including kernel shapes, speculative acceptance, state/KV memory, TTFT/TPOT
   p50/p99, goodput, scheduler occupancy, utilization, and stable concurrency.
-- [>] Strengthen local zero-replay/state-prefix, probabilistic sampler property,
+- [x] Strengthen local zero-replay/state-prefix, probabilistic sampler property,
   and unified FP8 KV capacity-report coverage before adding FP8 DeltaNet state.
 - [ ] Validate the already implemented DeltaNet branch-state path and prove
   zero rejected-prefix target replay under eager, Full, and Piecewise Graph.
@@ -49,7 +49,10 @@
 - [ ] Measure native versus the existing FP8 KV path across context length,
   concurrency, and offered load; decide from maximum SLO goodput rather than
   equal-concurrency latency.
-- [ ] Implement and then sweep FP8 DeltaNet committed/branch state; decide from
+- [>] Implement the local FP8 DeltaNet committed/branch state configuration,
+  quantization references, capacity model, lifecycle integration, and disabled
+  Triton load/store source. GPU enablement and goodput sweep remain pending.
+- [ ] Sweep FP8 DeltaNet committed/branch state and decide from
   effective scheduler batch, numerical correctness, and SLO goodput.
 - [ ] Recompute the complete 24 GB memory budget. Consider FFN W3A16 only if
   memory still prevents the best useful concurrency after prior phases.

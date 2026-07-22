@@ -88,3 +88,14 @@
   `20 passed, 1 skipped`; the skip requires CUDA and is not DSpark evidence.
 - `compileall` and `git diff --check` passed. No real BF16 draft was loaded, no
   model was downloaded, and no GPU/server/push command was run.
+
+## 2026-07-22 local state/sampler/KV evidence strengthening
+
+- Made multi-request prefix commits prevalidated and atomic; added committed
+  branch/discard counters and an explicit rejected-prefix target-replay counter.
+- Extracted a pure KV layout/capacity report used by runtime allocation and
+  reporting, including FP8 scale overhead and native MTP cache bytes.
+- Added randomized rejection-prefix invariants, multi-request prefix tests, and
+  Qwen3.6-style BF16/FP8 capacity comparisons.
+- Focused suite: `31 passed, 9 skipped`; all skips are CUDA attention tests and
+  remain pending. No GPU/server/push command was run.
