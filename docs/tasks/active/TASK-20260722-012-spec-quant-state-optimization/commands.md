@@ -99,3 +99,21 @@
   Qwen3.6-style BF16/FP8 capacity comparisons.
 - Focused suite: `31 passed, 9 skipped`; all skips are CUDA attention tests and
   remain pending. No GPU/server/push command was run.
+
+## 2026-07-22 FP8 DeltaNet state local implementation
+
+- Added independent `delta_state_dtype={auto,fp8_e4m3}` plumbing to config,
+  offline benchmark, API server, smoke/quant tools, and server script.
+- Added CPU references for conv per-channel and recurrent per-head/K-row FP8
+  E4M3 with FP16 scales, a shared slot pool, native/FP8 capacity reports, and a
+  GPU-independent capacity CLI.
+- Added experimental Triton row quantize/dequantize source behind an explicit
+  environment gate. Production engine startup is fail-closed for FP8 state
+  until fused GDN numerical/Graph validation exists; it never silently falls
+  back to native state.
+- Focused FP8 state/config/API/lifecycle suite: `37 passed`. `compileall` and
+  `git diff --check` passed. No CUDA compilation, GPU/server command, package
+  install, model download, or push was performed.
+- Combined CPU/Mock regression across goodput, GPTQ/native dispatch, DSpark,
+  speculative state/sampling, FP8 KV/capacity, FP8 Delta state, and API:
+  `83 passed, 26 skipped`. The skipped cases are CUDA-only and remain pending.

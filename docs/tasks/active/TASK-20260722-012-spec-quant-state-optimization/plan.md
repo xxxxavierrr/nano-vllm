@@ -27,6 +27,8 @@
   fallback. CUDA compilation/correctness/performance remain a later GPU gate.
 - [ ] Validate and optimize the native W4A16/W4A8 implementation on SM89,
   including tensor-core dataflow, Graph behavior, and target shapes.
+- [>] Restore the RTX 4090D server gate, then begin native W4 compilation and
+  correctness validation. No GPU result is inferred from local source/tests.
 - [x] Implement the local DSpark calibration shell, resumable sharded cache,
   strict streaming weight mapping, FP32-Hessian GPTQ quantizer, dry-run memory
   projection, and synthetic production-loader checkpoint round-trip.
@@ -49,7 +51,7 @@
 - [ ] Measure native versus the existing FP8 KV path across context length,
   concurrency, and offered load; decide from maximum SLO goodput rather than
   equal-concurrency latency.
-- [>] Implement the local FP8 DeltaNet committed/branch state configuration,
+- [x] Implement the local FP8 DeltaNet committed/branch state configuration,
   quantization references, capacity model, lifecycle integration, and disabled
   Triton load/store source. GPU enablement and goodput sweep remain pending.
 - [ ] Sweep FP8 DeltaNet committed/branch state and decide from
@@ -58,7 +60,7 @@
   memory still prevents the best useful concurrency after prior phases.
 - [ ] Benchmark, document results, and archive this task only after GPU evidence.
 
-## Commit boundaries on the GPU server
+## Commit boundaries
 
 1. framework-neutral goodput instrumentation and CPU aggregation tests;
 2. Marlin-style W4A16 small-M/large-M backend;
@@ -70,4 +72,6 @@
 8. optional FFN W3A16 only after the capacity gate;
 9. combined benchmark/report updates.
 
-Local checkout remains pull-only.
+While the server is unavailable, the user explicitly permits local commits but
+not push. When the server returns, local commits stop and GPU development again
+becomes the only commit/push source.

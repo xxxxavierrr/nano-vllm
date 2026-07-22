@@ -23,9 +23,14 @@
 - Speculative state reports now expose branch commits/discards and prove the
   production target-replay count remains zero; the shared KV capacity model
   reports payload, scale overhead, MTP bytes, blocks, and tokens consistently.
+- FP8 DeltaNet state now has end-to-end configuration plumbing, CPU numerical
+  references, branch-slot lifecycle coverage, exact payload/scale capacity
+  accounting, and disabled experimental Triton conversion source. Production
+  remains fail-closed until fused SM89 validation; this is not an enabled
+  runtime performance feature yet.
 
-GPU validation, kernel implementation, real DSpark calibration, and FP8
-DeltaNet state work remain active and are not claimed complete.
+GPU validation/optimization, real DSpark calibration, and FP8 DeltaNet runtime
+enablement remain active and are not claimed complete.
 
 Status: locally implemented; GPU validation pending.
 

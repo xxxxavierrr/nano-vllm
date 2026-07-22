@@ -49,6 +49,15 @@ semantics while avoiding infrastructure that nano-vLLM does not need.
 - State-capacity planning includes speculative branch slots and exposes their
   memory cost. If branch capacity is unavailable, scheduling reduces
   speculation or concurrency explicitly; state slots must never alias.
+- `delta_state_dtype` is independent of model weights and KV dtype. FP8 E4M3
+  uses separate FP16 dynamic scales: convolution state is scaled per
+  layer/slot/channel across kernel taps, and recurrent state per
+  layer/slot/head/K-row across V. Committed and speculative branch slots share
+  exactly the same payload/scale layout and lifecycle.
+- FP8 state kernels dequantize on state load and requantize on state write in
+  the recurrent/conv operator; production must not construct a full native
+  state slab. Until SM89 numerical and Graph validation passes, the runtime
+  fails explicit FP8-state startup rather than silently using native state.
 
 ## Scope
 
@@ -178,6 +187,9 @@ Required follow-up:
   concrete nano-vLLM alignment work.
 - 2026-07-22: Required the Stage 1 typed prepared-batch/context migration and
   complete removal of model-layer request metadata construction.
+- 2026-07-22: Defined independent FP8 DeltaNet state configuration, scale
+  granularity, branch lifecycle, capacity accounting, and fail-closed GPU
+  enablement pending SM89 validation.
 - 2026-07-22: Replaced uniform/non-uniform model-layer convolution branches
   with one packed causal-convolution entry. Output and state-commit remain two
   private kernels to preserve the read-old-state-before-overwrite dependency.

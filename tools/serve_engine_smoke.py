@@ -20,6 +20,7 @@ async def smoke(args):
             {
                 "enforce_eager": args.enforce_eager,
                 "kv_cache_dtype": args.kv_cache_dtype,
+                "delta_state_dtype": args.delta_state_dtype,
                 "cudagraph_mode": args.cudagraph_mode,
                 "piecewise_max_tokens": args.piecewise_max_tokens,
                 "max_num_batched_tokens": args.max_num_batched_tokens,
@@ -79,6 +80,7 @@ def main():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.5)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
+    parser.add_argument("--delta-state-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument(
         "--cudagraph-mode",
         choices=["FULL_AND_PIECEWISE", "FULL_DECODE_ONLY", "PIECEWISE", "NONE"],

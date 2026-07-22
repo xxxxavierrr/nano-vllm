@@ -13,6 +13,7 @@ class Config:
     quantization: str | None = None
     gptq_kernel_backend: str = "auto"
     kv_cache_dtype: str = "auto"
+    delta_state_dtype: str = "auto"
     speculative_method: str = "none"
     num_speculative_tokens: int = 2
     mtp_model: str | None = None
@@ -133,6 +134,15 @@ class Config:
         self.kv_cache_dtype = str(self.kv_cache_dtype).lower()
         if self.kv_cache_dtype not in ("auto", "fp8_e4m3"):
             raise ValueError("kv_cache_dtype must be 'auto' or 'fp8_e4m3'")
+        self.delta_state_dtype = str(self.delta_state_dtype).lower()
+        if self.delta_state_dtype not in ("auto", "fp8_e4m3"):
+            raise ValueError(
+                "delta_state_dtype must be 'auto' or 'fp8_e4m3'"
+            )
+        if self.delta_state_dtype == "fp8_e4m3" and self.model_family != "qwen3_5":
+            raise ValueError(
+                "FP8 DeltaNet state is only defined for Qwen3.5/3.6 hybrid models"
+            )
 
         self.cudagraph_mode = CUDAGraphMode.parse(self.cudagraph_mode)
         if self.enforce_eager:

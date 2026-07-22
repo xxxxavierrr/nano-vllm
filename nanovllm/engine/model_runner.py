@@ -74,6 +74,18 @@ class ModelRunner:
         init_method = f"tcp://{config.master_host}:{config.master_port}"
         dist.init_process_group("nccl", init_method, world_size=self.world_size, rank=rank)
         torch.cuda.set_device(config.device_ids[rank])
+        if config.delta_state_dtype == "fp8_e4m3":
+            capability = torch.cuda.get_device_capability()
+            if capability < (8, 9):
+                raise RuntimeError(
+                    "FP8 DeltaNet state validation requires SM89 or newer; "
+                    f"current capability is SM{capability[0]}{capability[1]}"
+                )
+            raise RuntimeError(
+                "FP8 DeltaNet state runtime is fail-closed pending fused "
+                "conv/recurrent SM89 correctness and CUDA Graph validation; "
+                "use delta_state_dtype='auto' for production"
+            )
         if config.kv_cache_dtype == "fp8_e4m3":
             capability = torch.cuda.get_device_capability()
             head_dim = getattr(

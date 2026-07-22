@@ -102,6 +102,12 @@ Implemented local evidence:
   sampler shapes, FP8 scale overhead, theoretical 1.984x head-dim-256 target
   KV compression, and reduced combined gain when native MTP KV remains BF16
   (`31 passed, 9 CUDA skipped`).
+- FP8 DeltaNet tests cover scale granularity, zero/non-finite safety,
+  quantize/dequantize error, payload/scale/branch capacity, committed-prefix
+  remap using the same slot IDs, fail-closed experimental kernels, hybrid-only
+  config, API regression, and the standalone capacity CLI (`37 passed`).
+- Final combined selected regression: `83 passed, 26 CUDA skipped`; skipped
+  tests are recorded as unavailable, not successful.
 
 Deferred evidence:
 
@@ -116,6 +122,10 @@ Deferred evidence:
 - Native `.cu` compilation, numerical equivalence, tensor-core utilization,
   Full/Piecewise Graph behavior, and latency are pending on RTX 4090D. Source
   presence and CPU dispatch tests are not CUDA validation.
+- FP8 DeltaNet conversion kernels are not fused into production conv/recurrent
+  execution and the runtime intentionally rejects explicit enablement. SM89
+  kernel correctness, error over long sequences, Graph stability, memory
+  capacity, scheduler batch, and goodput are pending.
 - Full/Piecewise Graph replay, end-to-end Qwen3.6 accuracy, 24 GB capacity,
   online serving, and all performance benchmarks require the RTX 4090D server.
 - Full local collection is additionally blocked by missing `flash_attn`; broad

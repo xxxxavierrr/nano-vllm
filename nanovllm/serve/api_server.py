@@ -459,6 +459,7 @@ def parse_args(argv: list[str] | None = None):
         default="auto",
     )
     parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
+    parser.add_argument("--delta-state-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument(
         "--speculative-method", choices=["none", "mtp"], default="none"
     )
@@ -534,6 +535,7 @@ def _build_replica_engine_kwargs(args, shm_name: str) -> list[dict]:
         "quantization": args.quantization,
         "gptq_kernel_backend": args.gptq_kernel_backend,
         "kv_cache_dtype": args.kv_cache_dtype,
+        "delta_state_dtype": args.delta_state_dtype,
         "speculative_method": args.speculative_method,
         "num_speculative_tokens": args.num_speculative_tokens,
         "mtp_model": args.mtp_model,

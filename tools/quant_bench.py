@@ -12,6 +12,7 @@ def main():
     parser.add_argument("model")
     parser.add_argument("--quantization", choices=["fp8", "gptq"])
     parser.add_argument("--kv-cache-dtype", choices=["auto", "fp8_e4m3"], default="auto")
+    parser.add_argument("--delta-state-dtype", choices=["auto", "fp8_e4m3"], default="auto")
     parser.add_argument("--max-tokens", type=int, default=128)
     args = parser.parse_args()
 
@@ -21,6 +22,7 @@ def main():
         os.path.expanduser(args.model),
         quantization=args.quantization,
         kv_cache_dtype=args.kv_cache_dtype,
+        delta_state_dtype=args.delta_state_dtype,
         enforce_eager=True,
         tensor_parallel_size=1,
     )
@@ -54,6 +56,7 @@ def main():
     print(f"init_seconds={init_seconds:.3f}")
     print(f"model_storage_mib={(parameter_bytes + buffer_bytes) / 2**20:.2f}")
     print(f"kv_cache_dtype={config.kv_cache_dtype}")
+    print(f"delta_state_dtype={config.delta_state_dtype}")
     print(f"kv_cache_payload_bytes_per_block={config.kvcache_payload_bytes}")
     print(f"kv_cache_storage_dtype={config.kvcache_storage_dtype}")
     print(f"kv_cache_scale_bytes_per_block={config.kvcache_scale_bytes}")

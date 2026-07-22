@@ -13,6 +13,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.5}"
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-FULL_AND_PIECEWISE}"
 PIECEWISE_MAX_TOKENS="${PIECEWISE_MAX_TOKENS:-512}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
+DELTA_STATE_DTYPE="${DELTA_STATE_DTYPE:-auto}"
 SPECULATIVE_METHOD="${SPECULATIVE_METHOD:-none}"
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-2}"
 MTP_MODEL="${MTP_MODEL:-}"
@@ -58,6 +59,7 @@ exec "$PYTHON_BIN" -m nanovllm.serve.api_server \
     --master-port "$MASTER_PORT" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --kv-cache-dtype "$KV_CACHE_DTYPE" \
+    --delta-state-dtype "$DELTA_STATE_DTYPE" \
     --speculative-method "$SPECULATIVE_METHOD" \
     --num-speculative-tokens "$NUM_SPECULATIVE_TOKENS" \
     --data-parallel-size "$DATA_PARALLEL_SIZE" \
