@@ -25,9 +25,9 @@
 - [x] Add an opt-in native SM89 W4 extension, small/large-M W4A16 dispatcher,
   experimental large-M W4A8 source, layout validation, and safe Triton
   fallback. CUDA compilation/correctness/performance remain a later GPU gate.
-- [ ] Validate and optimize the native W4A16/W4A8 implementation on SM89,
+- [>] Validate and optimize the native W4A16/W4A8 implementation on SM89,
   including tensor-core dataflow, Graph behavior, and target shapes.
-- [>] Restore the RTX 4090D server gate, then begin native W4 compilation and
+- [x] Restore the RTX 4090D server gate, then begin native W4 compilation and
   correctness validation. No GPU result is inferred from local source/tests.
 - [x] Implement the local DSpark calibration shell, resumable sharded cache,
   strict streaming weight mapping, FP32-Hessian GPTQ quantizer, dry-run memory
@@ -46,6 +46,10 @@
   add a blockwise fused implementation only after the correctness path passes.
 - [ ] Validate combined W4A16 + MTP/DSpark + branch state + probabilistic
   sampler + Full/Piecewise Graph behavior on the RTX 4090D.
+- [ ] Close the consolidated runtime evidence from archived TASK-002/008/009/
+  010: GDN recurrent/chunk crossover, stable Graph dummy state, per-region
+  captured-key/replay proof, and MTP offered-load goodput. Typed batch and
+  typed metrics extraction themselves are complete.
 - [ ] Implement and evaluate fused W4A8 for large-M only; retain W4A16 for
   small-M unless end-to-end evidence selects otherwise.
 - [ ] Measure native versus the existing FP8 KV path across context length,

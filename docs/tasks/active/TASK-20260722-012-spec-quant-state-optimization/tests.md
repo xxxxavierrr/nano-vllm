@@ -92,6 +92,24 @@ Implemented local evidence:
   SM89 gating, the `M=64/65` shape boundary, normalized layout rejection, and
   per-row/per-group W4A8 activation quantization (`32 passed, 17 CUDA skipped`
   with the wider GPTQ/config/API regression set).
+- Native W4A16 now has real SM89 evidence: the CUDA 12.8 extension compiles,
+  repacked non-monotonic `g_idx` uses the fused activation permutation, all
+  tested `M=1,8,19,64,65,128,512` shapes meet BF16 tolerance, and both
+  `torch.compile(fullgraph=True)` and direct CUDA Graph replay match eager.
+  The formal native plus Triton GPU regression passes (`29 passed`). The full
+  server suite with the native extension loaded passes (`205 passed, 1
+  deprecation warning`); skipped source-only evidence is no longer used to
+  claim W4A16 CUDA correctness.
+- The first WMMA packed-word prototype is materially faster than the scalar
+  scaffold but remains slower than repacked Triton on `K=N=5120`; therefore
+  `auto` intentionally remains Triton and native remains explicit opt-in.
+- Later tile experiments retained small `16x64x128` and large
+  `32x128x32` as the best tested combination. Direct numerical, fullgraph,
+  and CUDA Graph evidence remains valid; the rejected `16x32x32` small
+  candidate is not retained.
+- The final retained source was rebuilt and the native/Triton focused suite
+  rerun successfully (`29 passed`). Required structure/compile/diff checks and
+  all 126 documentation relative links pass after archival.
 - DSpark local tests cover config/forward shapes, strict missing/unknown weight
   mapping, append/resume/cache hashes, FP32 Hessian accumulation, GPTQ packing
   and reconstruction, sharded checkpoint index/config, dry-run projection, and
@@ -119,9 +137,11 @@ Deferred evidence:
 - New recurrent and causal-conv prefix-state CUDA tests are written but skipped
   locally because CUDA is unavailable.
 - Repacked W4 Triton correctness/compile/Graph tests are written but skipped.
-- Native `.cu` compilation, numerical equivalence, tensor-core utilization,
-  Full/Piecewise Graph behavior, and latency are pending on RTX 4090D. Source
-  presence and CPU dispatch tests are not CUDA validation.
+- Native W4A8 numerical/Graph/performance validation, profiler-confirmed
+  pipeline/tensor-core utilization, true Piecewise integration inside the
+  complete model, and a real Marlin-layout/multi-stage W4A16 implementation
+  remain pending. Direct fullgraph/CUDA Graph evidence is complete, but the
+  native prototype does not beat Triton.
 - FP8 DeltaNet conversion kernels are not fused into production conv/recurrent
   execution and the runtime intentionally rejects explicit enablement. SM89
   kernel correctness, error over long sequences, Graph stability, memory
@@ -130,6 +150,6 @@ Deferred evidence:
   online serving, and all performance benchmarks require the RTX 4090D server.
 - Full local collection is additionally blocked by missing `flash_attn`; broad
   regression commands that timed out are not counted as successful.
-- No W4A16/W4A8, FP8 capacity, GPU-utilization, or SLO-throughput number exists
-  while the RTX 4090D server is unavailable; theoretical compression is not a
-  benchmark result.
+- W4A16 now has a raw-kernel SM89 latency baseline. W4A8, FP8 capacity,
+  GPU-utilization, and SLO-throughput measurements remain pending; theoretical
+  compression is not a benchmark result.

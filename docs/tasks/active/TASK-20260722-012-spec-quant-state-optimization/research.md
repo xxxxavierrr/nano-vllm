@@ -78,3 +78,15 @@ tokens/s, a time-weighted average running-request metric, external GPU
 telemetry provenance, or an open-loop offered-load search. Its MTP sweep is
 closed-loop, so it can expose saturation and capacity but cannot alone claim a
 maximum sustainable request arrival rate under an SLO.
+
+## 2026-07-23 current vLLM Marlin location
+
+The official vLLM main tree now places dense Marlin under
+`csrc/libtorch_stable/quantization/marlin/`, including
+`marlin_template.h`, `marlin_mma.h`, `dequant.h`, and GPTQ repack source.
+The upstream template describes multiple asynchronous global-to-shared stages
+and a specialized packed layout. That architecture explains why matching only
+Triton block dimensions did not match Triton's staged pipeline on SM89.
+Porting details remain future research; this task records the location and
+required architectural distinction without importing a partial upstream
+kernel.

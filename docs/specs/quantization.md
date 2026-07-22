@@ -230,3 +230,7 @@ target checkpoint shapes.
   source boundary; CUDA validation remains required before enablement.
 - 2026-07-23: Added calibration-phase and FP8 DeltaNet module ownership
   boundaries; public orchestration may not absorb their internal algorithms.
+- 2026-07-23: Recorded SM89 native W4A16 numerical/fullgraph/direct-Graph
+  success and raw latency failure versus repacked Triton. `auto` remains
+  Triton; future native enablement requires Marlin layout plus an asynchronous
+  multi-stage pipeline, not WMMA tiling alone.

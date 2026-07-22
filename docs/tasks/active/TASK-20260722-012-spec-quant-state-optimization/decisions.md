@@ -35,3 +35,18 @@
 - Mark branch-state and probability-difference sampling as implemented pending
   GPU validation, not as future implementations. Mark FP8 KV as implemented
   pending capacity/goodput measurement.
+
+## 2026-07-23
+
+- Keep `auto` on repacked Triton. Native W4A16 is correct and Graph-safe but
+  remains explicit opt-in because every measured K=N=5120 point is slower.
+- Do not call the WMMA prototype Marlin-complete. True Marlin work requires a
+  load-time Marlin weight layout and a multi-stage asynchronous
+  global-to-shared pipeline/warp-specialized dataflow, not only WMMA tiles.
+- Retain the best measured small/large template specialization and document
+  rejected tiles; do not continue blind constant tuning without hardware
+  profiler or a faithful Marlin port.
+- Archive typed-batch, speculator, and typed-metrics extraction tasks after GPU
+  integration evidence. Archive GDN/state/semantic-Graph tasks as superseded
+  only after their unresolved Graph/performance gates are copied into this
+  optimization task.

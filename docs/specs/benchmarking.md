@@ -129,9 +129,9 @@ optimization comparison.
 
 ## Constraints
 
-- Current local Windows development has no usable CUDA server. Schema,
-  instrumentation, and CPU aggregation tests can proceed; GPU values and
-  performance decisions remain pending.
+- The local Windows checkout remains non-CUDA and pull-only while the restored
+  GPU server is the source of implementation, commits, and performance
+  evidence.
 - The production target is one RTX 4090D 24 GB (Ada SM89).
 
 ## Open questions
@@ -151,3 +151,6 @@ optimization comparison.
   service latency, and standardized schema v3 engine/GPU telemetry provenance.
 - 2026-07-23: Required single-source timing/SLO facts and separated offline
   execution, aggregation, result construction, and presentation boundaries.
+- 2026-07-23: Restored RTX 4090D execution and recorded integration/raw-kernel
+  evidence; goodput defaults still require offered-load sweeps rather than
+  short smoke timings.

@@ -198,3 +198,6 @@ Required follow-up:
   path.
 - 2026-07-22: Classified FP8 DeltaNet state as a capacity optimization gated by
   effective scheduler batch and SLO-goodput evidence, not byte savings alone.
+- 2026-07-23: Recorded Qwen3.6 MTP branch-state GPU integration with explicit
+  zero rejected-prefix target replay; retained recurrent/chunk crossover and
+  semantic Graph dummy-slot validation in the consolidated optimization task.

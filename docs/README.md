@@ -15,14 +15,11 @@ knowledge outside transient chat history.
 
 ## Current state
 
-- Active: [TASK-20260722-002 GDN refactor](tasks/active/TASK-20260722-002-gdn-refactor/README.md)
-- Active implementation: [TASK-20260722-007 typed-batch foundation](tasks/active/TASK-20260722-007-runtime-batch-foundation/README.md)
-- Active implementation: [TASK-20260722-008 hybrid state manager](tasks/active/TASK-20260722-008-hybrid-state-manager/README.md)
-- Active implementation: [TASK-20260722-009 speculator extraction](tasks/active/TASK-20260722-009-speculator-extraction/README.md)
-- Active implementation: [TASK-20260722-010 semantic Full Graph](tasks/active/TASK-20260722-010-semantic-full-graph/README.md)
-- Active implementation: [TASK-20260722-011 typed step metrics](tasks/active/TASK-20260722-011-typed-step-metrics/README.md)
 - Active optimization: [TASK-20260722-012 quant/spec/state optimization](tasks/active/TASK-20260722-012-spec-quant-state-optimization/README.md)
-- Latest completed: [TASK-20260723-013 structural harness and refactor](tasks/completed/TASK-20260723-013-structural-harness-refactor/README.md)
+- Latest archive consolidation: TASK-002 and TASK-007 through TASK-011 moved
+  under [completed tasks](tasks/completed/); unresolved Graph/GDN/goodput gates
+  are explicitly retained by TASK-012.
+- Latest completed implementation: [TASK-20260723-013 structural harness and refactor](tasks/completed/TASK-20260723-013-structural-harness-refactor/README.md)
 
 This index must be updated whenever a task is archived or the project-level
 architecture, interfaces, test strategy, or operational workflow changes.

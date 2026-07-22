@@ -296,6 +296,7 @@ def gptq_w4a16_linear(
             x,
             qweight,
             scales,
+            input_perm,
             bias,
             group_size=group_size,
             kernel=selected,

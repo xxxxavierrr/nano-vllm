@@ -26,6 +26,9 @@ See the owning [CUDA Graph specification](../specs/cuda-graphs.md).
   capacity planning.
 - A mode label does not prove replay. Evidence needs captured keys and replay
   counters or equivalent profiler/framework output.
+- Direct custom-op `torch.compile(fullgraph=True)` and direct CUDA Graph replay
+  prove that an operator is trace/capture-safe; they do not prove that every
+  surrounding Piecewise Inductor region was captured.
 
 ## nano-vLLM watch points
 
@@ -40,6 +43,9 @@ See the owning [CUDA Graph specification](../specs/cuda-graphs.md).
   before final KV/DeltaNet capacity.
 - Gated DeltaNet padding requires inert state slots or masking and numerical
   state comparison, not only final-token comparison.
+- The RTX 4090D Qwen3-0.6B smoke demonstrated one PIECEWISE prefill and seven
+  FULL decode dispatches with zero EAGER fallback. Inductor CPU-argument skip
+  messages mean per-region captured-key/replay proof remains required.
 
 ## Source basis
 

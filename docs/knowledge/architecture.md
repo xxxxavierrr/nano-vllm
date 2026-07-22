@@ -55,6 +55,25 @@ owns the detailed contracts and staged migration.
 `ModelRunner` continues to own initialization and step order. This internal
 decomposition does not require a new EngineCore/LocalExecutor process boundary.
 
+## Validated internal contracts
+
+- `PreparedBatch` and its typed attention/GDN/speculative metadata are the
+  only model-step input contract; model layers do not reconstruct scheduler
+  metadata.
+- Forward context is scoped and exception-safe. Nested target/draft execution
+  must restore the prior context.
+- `HybridStateManager` owns state slots and committed/branch slabs;
+  speculative acceptance selects slots rather than copying or replaying the
+  target model.
+- Runner results carry immutable typed execution/speculative metrics. Engines
+  and benchmarks consume the returned envelope rather than mutable
+  `last_*` side channels.
+- `MTPProposer` owns draft input/cache construction and recursive proposal;
+  acceptance and state commit remain separate policies/phases.
+
+These contracts were exercised together by the RTX 4090D unfiltered suite and
+Qwen3.6 GPTQ/MTP smoke before their extraction tasks were archived.
+
 ## Parallelism boundary
 
 Data parallelism remains whole-request routing across independent EngineProc

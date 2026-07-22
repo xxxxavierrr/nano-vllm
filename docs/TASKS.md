@@ -4,13 +4,7 @@
 
 | Spec | Task | Status | Current gate |
 | --- | --- | --- | --- |
-| [Gated DeltaNet](specs/gated-deltanet.md) | [TASK-20260722-002 GDN refactor](tasks/active/TASK-20260722-002-gdn-refactor/README.md) | active | GPU correctness, loader, graph, and performance validation |
-| [Runtime architecture](specs/inference-runtime-architecture.md) / [Gated DeltaNet](specs/gated-deltanet.md) | [TASK-20260722-007 typed-batch foundation](tasks/active/TASK-20260722-007-runtime-batch-foundation/README.md) | active | Dirty-diff inventory and compatibility-safe metadata migration |
-| [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-008 hybrid state manager](tasks/active/TASK-20260722-008-hybrid-state-manager/README.md) | active | Extract GDN state lifetime and speculative transaction |
-| [Runtime architecture](specs/inference-runtime-architecture.md) / [Speculative decoding](specs/speculative-decoding.md) | [TASK-20260722-009 speculator extraction](tasks/active/TASK-20260722-009-speculator-extraction/README.md) | active | Extract MTP proposal and acceptance interfaces |
-| [Runtime architecture](specs/inference-runtime-architecture.md) / [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-010 semantic Full Graph](tasks/active/TASK-20260722-010-semantic-full-graph/README.md) | active | Implement semantic q=1/q=1+k capture keys and replay |
-| [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-011 typed step metrics](tasks/active/TASK-20260722-011-typed-step-metrics/README.md) | active | Return metrics with rank-local model results |
-| [Quantization](specs/quantization.md) / [Speculative decoding](specs/speculative-decoding.md) / [Gated DeltaNet](specs/gated-deltanet.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260722-012 quant/spec/state optimization](tasks/active/TASK-20260722-012-spec-quant-state-optimization/README.md) | active | Implement benchmark instrumentation locally; RTX 4090D correctness and SLO-goodput validation pending |
+| [Quantization](specs/quantization.md) / [Speculative decoding](specs/speculative-decoding.md) / [Gated DeltaNet](specs/gated-deltanet.md) / [CUDA Graphs](specs/cuda-graphs.md) / [Runtime architecture](specs/inference-runtime-architecture.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260722-012 quant/spec/state optimization](tasks/active/TASK-20260722-012-spec-quant-state-optimization/README.md) | active | Native W4 remains behind Triton; future Marlin pipeline plus consolidated Graph/GDN/DSpark/goodput gates |
 
 ## Completed
 
@@ -22,6 +16,12 @@
 | [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-005 vLLM V1 study](tasks/completed/TASK-20260722-005-vllm-v1-cudagraph-study/README.md) | 2026-07-22 | Pinned V1 policy, keys, capture ownership, backend capability, memory rules, and local gaps documented |
 | [Inference runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-006 Qwen3.6 runtime architecture](tasks/completed/TASK-20260722-006-qwen36-runtime-architecture/README.md) | 2026-07-22 | Cross-capability ownership, target components, non-goals, and staged refactoring order documented |
 | [Engineering workflow](specs/engineering-workflow.md) / [Runtime architecture](specs/inference-runtime-architecture.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260723-013 structural harness and refactor](tasks/completed/TASK-20260723-013-structural-harness-refactor/README.md) | 2026-07-23 | Executable structure gate, decomposed orchestration, and RTX 4090D runtime validation |
+| [Gated DeltaNet](specs/gated-deltanet.md) | [TASK-20260722-002 GDN refactor](tasks/completed/TASK-20260722-002-gdn-refactor/README.md) | 2026-07-23 | Superseded after GPU integration; dedicated Graph/crossover/goodput gates consolidated into TASK-012 |
+| [Runtime architecture](specs/inference-runtime-architecture.md) / [Gated DeltaNet](specs/gated-deltanet.md) | [TASK-20260722-007 typed-batch foundation](tasks/completed/TASK-20260722-007-runtime-batch-foundation/README.md) | 2026-07-23 | Typed prepared-batch metadata and scoped forward context completed and GPU-validated |
+| [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-008 hybrid state manager](tasks/completed/TASK-20260722-008-hybrid-state-manager/README.md) | 2026-07-23 | Superseded after zero-replay GPU integration; Graph/capacity follow-up consolidated into TASK-012 |
+| [Runtime architecture](specs/inference-runtime-architecture.md) / [Speculative decoding](specs/speculative-decoding.md) | [TASK-20260722-009 speculator extraction](tasks/completed/TASK-20260722-009-speculator-extraction/README.md) | 2026-07-23 | MTP proposer/acceptance extraction completed and Qwen3.6 k=2 GPU-integrated |
+| [Runtime architecture](specs/inference-runtime-architecture.md) / [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-010 semantic Full Graph](tasks/completed/TASK-20260722-010-semantic-full-graph/README.md) | 2026-07-23 | Superseded after semantic dispatch smoke; per-region replay proof consolidated into TASK-012 |
+| [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-011 typed step metrics](tasks/completed/TASK-20260722-011-typed-step-metrics/README.md) | 2026-07-23 | Typed runner result metrics completed and exercised in GPU benchmark JSON/online engine |
 
 ## Rules
 

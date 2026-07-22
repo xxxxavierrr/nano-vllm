@@ -32,6 +32,23 @@ except ImportError as exc:
 else:
     _native_import_error = None
 
+def _fake_native_w4(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    input_perm: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    del scales, input_perm, group_size
+    return x.new_empty((x.shape[0], qweight.shape[1]))
+
+
+if _native_extension is not None:
+    for _op_name in ("w4a16_small", "w4a16_large", "w4a8_large"):
+        torch.library.register_fake(
+            f"nanovllm_native::{_op_name}"
+        )(_fake_native_w4)
+
 
 def native_extension_status() -> NativeExtensionStatus:
     return NativeExtensionStatus(
@@ -106,6 +123,7 @@ def native_w4a16_linear(
     x: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
+    input_perm: torch.Tensor,
     bias: torch.Tensor | None,
     *,
     group_size: int,
@@ -116,9 +134,21 @@ def native_w4a16_linear(
     input_shape = x.shape
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()
     if kernel is W4Kernel.NATIVE_SMALL:
-        output = _native_extension.w4a16_small(x_2d, qweight, scales, group_size)
+        output = torch.ops.nanovllm_native.w4a16_small.default(
+            x_2d,
+            qweight,
+            scales,
+            input_perm,
+            group_size,
+        )
     elif kernel is W4Kernel.NATIVE_LARGE:
-        output = _native_extension.w4a16_large(x_2d, qweight, scales, group_size)
+        output = torch.ops.nanovllm_native.w4a16_large.default(
+            x_2d,
+            qweight,
+            scales,
+            input_perm,
+            group_size,
+        )
     else:
         raise ValueError(f"invalid native kernel {kernel}")
     if bias is not None:
@@ -130,6 +160,7 @@ def native_w4a8_linear(
     x: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
+    input_perm: torch.Tensor,
     bias: torch.Tensor | None = None,
     *,
     group_size: int = 128,
@@ -142,10 +173,11 @@ def native_w4a8_linear(
         capability=torch.cuda.get_device_capability(x.device),
     )
     input_shape = x.shape
-    output = _native_extension.w4a8_large(
+    output = torch.ops.nanovllm_native.w4a8_large.default(
         x.reshape(-1, x.shape[-1]).contiguous(),
         qweight,
         scales,
+        input_perm,
         group_size,
     )
     if bias is not None:

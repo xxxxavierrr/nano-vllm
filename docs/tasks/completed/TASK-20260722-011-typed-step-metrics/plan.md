@@ -1,0 +1,7 @@
+# Plan
+
+- [x] Add typed metrics/result contracts and migrate ModelRunner returns.
+- [x] Migrate LLMEngine and benchmark consumers; remove `last_*` state.
+- [x] Run static and CPU regressions.
+- [x] Confirm offline JSON metrics and online engine execution on the GPU
+  server; archive.

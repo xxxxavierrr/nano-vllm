@@ -1,67 +1,40 @@
 # Result
 
-## Delivered locally
+Status: active.
 
-- Four pre-existing feature groups were separated into independently reviewed
-  local commits; nothing was pushed.
-- Benchmark schema v3 now measures SLO-good output-token throughput,
-  accepted-token throughput when provided, planned-arrival and service
-  latency, time-weighted client/engine occupancy, and actual versus padded
-  scheduled work.
-- `--mode online-sweep` performs offered-load growth and boundary refinement;
-  optional `nvidia-smi` telemetry records sampling provenance or an explicit
-  missing reason.
-- Native W4 support is now an explicit opt-in build/runtime backend with safe
-  Triton fallback, SM89/layout guards, small/large-M W4A16 entry points, and a
-  disabled experimental large-M W4A8 entry point. It is source-complete for
-  later server iteration, not performance-validated.
-- DSpark offline tooling can now persist target-produced calibration tensors,
-  stream a draft-only BF16 checkpoint, run layer-at-a-time CPU GPTQ, and emit a
-  sharded group-128 checkpoint in the production loader's packed format. Only
-  a synthetic model has been exercised locally; real checkpoint compatibility
-  and acceptance remain pending.
-- Speculative state reports now expose branch commits/discards and prove the
-  production target-replay count remains zero; the shared KV capacity model
-  reports payload, scale overhead, MTP bytes, blocks, and tokens consistently.
-- FP8 DeltaNet state now has end-to-end configuration plumbing, CPU numerical
-  references, branch-slot lifecycle coverage, exact payload/scale capacity
-  accounting, and disabled experimental Triton conversion source. Production
-  remains fail-closed until fused SM89 validation; this is not an enabled
-  runtime performance feature yet.
+Delivered and validated:
 
-GPU validation/optimization, real DSpark calibration, and FP8 DeltaNet runtime
-enablement remain active and are not claimed complete.
+- framework-neutral schema-v3 goodput/SLO aggregation and offered-load sweep;
+- indexed speculative DeltaNet branch state with zero rejected-prefix target
+  replay in the Qwen3.6 MTP k=2 GPU smoke;
+- lossless probability-ratio rejection and `(p-q)+` recovery correctness path;
+- GPTQ load-time repack plus fused activation permutation and strict fused
+  shard `g_idx` validation;
+- FP8 KV runtime/capacity reporting and Qwen3 GPU smoke;
+- local DSpark calibration/cache/GPTQ checkpoint tooling with synthetic
+  production-loader round trip;
+- FP8 DeltaNet state references/capacity/plumbing, still fail-closed pending
+  fused GPU validation;
+- native SM89 W4A16 build, numerical correctness, fullgraph compatibility,
+  direct CUDA Graph replay, and raw kernel measurements.
 
-Status: locally implemented; GPU validation pending.
+Current W4 conclusion:
 
-Delivered so far:
+- loading each packed INT32 once and expanding eight INT4 values removed the
+  largest scalar-prototype waste;
+- the best retained WMMA specializations are small `16x64x128` and large
+  `32x128x32` with two accumulators per warp;
+- for K=N=5120 they still trail repacked Triton by about 1.18x at M=1 and
+  1.20x at M=512, with larger mid-M gaps;
+- `auto` therefore remains Triton, and native remains opt-in;
+- a future native attempt must implement Marlin layout plus asynchronous
+  multi-stage dataflow instead of further unguided tile tuning.
 
-- corrected local implementation assessment;
-- pinned vLLM V1 source comparison;
-- integrated design for indexed GDN branch state, lossless probabilistic
-  rejection sampling, and W4A16 runtime repacking/kernel optimization;
-- staged implementation and validation plan.
-- indexed speculative GDN prefix-state slots with commit-by-remap and no target
-  replay;
-- temperature-aware MTP draft sampling, retained draft logits, probability
-  ratio acceptance, and `(p-q)+` recovery sampling;
-- one-time GPTQ `argsort(g_idx)` qweight repack plus fused activation
-  permutation/direct-group runtime access;
-- CPU correctness tests and deferred CUDA tests for all three paths.
+TASK-002 and TASK-007 through TASK-011 have been consolidated and archived.
+Their remaining GDN/Graph/MTP goodput gates are now explicit plan items here;
+no missing evidence was silently marked complete.
 
-No GPU correctness or performance claim has been validated. The PyTorch
-rejection sampler is currently the correctness backend; a blockwise Triton
-sampler and optional SM89 Marlin-style CUDA W4 backend remain benchmark-driven
-follow-ups. The task stays active until RTX 4090D validation is complete.
-
-The roadmap now uses SLO goodput as its primary objective and explicitly orders
-W4A16 small/large-M, state-branch/rejection correctness, W4A8 large-M, FP8 KV,
-FP8 DeltaNet state, and only then optional W3A16. Benchmark instrumentation can
-be completed locally, but all GPU and capacity conclusions remain pending.
-
-Status is now explicit: GDN state branches, the probability-difference
-correctness sampler, GPTQ repack/Triton fallback, and FP8 KV functionality
-already exist locally. They require GPU validation or capacity measurement;
-they are not reimplementation milestones. The 8.8 GB BF16 DSpark draft is
-offline-only on 24 GB, so the first online DSpark baseline requires INT4 draft
-calibration and packing.
+Still required before this task can archive: real INT4 DSpark calibration and
+paired target baseline, combined Graph/state/sampler validation, W4A8 decision,
+FP8 KV and DeltaNet-state offered-load goodput sweeps, complete 24 GB memory
+ledger, and the final SLO-based benchmark report.

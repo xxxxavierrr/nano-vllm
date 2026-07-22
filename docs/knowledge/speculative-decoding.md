@@ -17,6 +17,12 @@ Originating spec: [Speculative decoding and Qwen MTP](../specs/speculative-decod
   sampling claims require the latter and its distributional tests.
 - The next proposal consumes post-processed accepted/rejected state. It may
   overlap independent output transfer, but not state-commit ordering.
+- Draft logits, request RNG state, acceptance results, and state-prefix
+  selection are typed step data. They must not be reconstructed from mutable
+  runner side channels.
+- Stateful hybrid models should reserve all `1+k` candidate prefix states in
+  one branch table, then commit by index/remap. This keeps rejection sampling
+  independent from recurrent-state implementation.
 
 ## Metrics
 
@@ -27,6 +33,8 @@ Originating spec: [Speculative decoding and Qwen MTP](../specs/speculative-decod
   `1 + accepted_draft_tokens / draft_rounds`.
 - Choose `k` using end-to-end throughput/latency under concurrency, not raw
   acceptance rate.
+- A smoke proving proposal/verification and zero replay is integration
+  evidence, not a `k` or DSpark goodput conclusion.
 
 ## Source baseline and exclusions
 

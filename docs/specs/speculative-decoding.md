@@ -208,8 +208,8 @@ INT4 draft; published BF16 acceptance cannot be reported as locally measured.
 ## Open questions
 
 - Can target verification and next MTP proposal share hidden states safely?
-- Which state owners can discard rejected suffixes by pointer/accounting, and
-  which must replay the accepted prefix to reconstruct recurrent state?
+- Whether future proposer families require a branch representation beyond the
+  current indexed conv/recurrent prefix slots.
 
 ## Change log
 
@@ -229,3 +229,6 @@ INT4 draft; published BF16 acceptance cannot be reported as locally measured.
 - 2026-07-22: Added DSpark/DFlash offline cache, strict checkpoint mapping, and
   in-repository GPTQ draft conversion to scope; online tree proposal remains
   gated on real checkpoint/GPU validation.
+- 2026-07-23: Recorded Qwen3.6 MTP k=2 GPU integration, indexed branch commits,
+  and zero rejected-prefix replay; multi-k/DSpark acceptance and offered-load
+  goodput remain pending.

@@ -9,3 +9,7 @@
 - Keep public behavior, architecture decisions, and benchmark methodology in
   docs; do not rely on commit messages or chat history as the only record.
 - New work follows [the repository workflow](../../.workflow/README.md).
+- When the GPU server is available, it is the sole implementation/commit/push
+  source for this project; the local Windows checkout only pulls. Temporary
+  build and profiler artifacts stay outside the repository and are not
+  committed.

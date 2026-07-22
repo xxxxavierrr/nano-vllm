@@ -117,3 +117,75 @@
 - Combined CPU/Mock regression across goodput, GPTQ/native dispatch, DSpark,
   speculative state/sampling, FP8 KV/capacity, FP8 Delta state, and API:
   `83 passed, 26 skipped`. The skipped cases are CUDA-only and remain pending.
+
+## 2026-07-23 native W4 SM89 validation and first optimization pass
+
+- Verified the restored server stack: RTX 4090D / SM89, PyTorch 2.8.0+cu128,
+  CUDA toolkit 12.8, and the existing repository environment. No dependency
+  was installed and build products stayed under `/tmp/nanovllm-w4-build`.
+- Built the opt-in extension with
+  `NANOVLLM_BUILD_CUDA_EXT=1 TORCH_CUDA_ARCH_LIST=8.9 python setup.py build_ext`
+  using the existing toolkit. The first build used the scalar scaffold; later
+  builds compiled the WMMA prototype. Distutils was used because ninja is not
+  installed.
+- The first native numerical run failed because the load-time repacked weight
+  path discarded `input_perm` (`191/192` elements wrong). Propagated the
+  permutation through Python, C++, W4A16, and W4A8 and added strict CUDA layout
+  validation. The corrected scalar kernel met `rtol=atol=3e-2` for
+  `M=1,8,32,64,65,128,512`, with relative L2 about `0.22%-0.24%` versus the
+  strict FP32 reference.
+- Direct pybind calls failed `torch.compile(fullgraph=True)` with an unsupported
+  PyCapsule. Registered `nanovllm_native` schemas and CUDA implementations via
+  `TORCH_LIBRARY`, added fake implementations, and routed runtime through
+  `torch.ops`. Fullgraph output then matched eager exactly and direct CUDA
+  Graph capture/replay matched eager exactly.
+- Replaced the scalar W4A16 core with a shared-memory WMMA prototype. CUDA 12.8
+  required `__nv_bfloat16` fragment types rather than
+  `wmma::precision::bfloat16`; the failed compile and correction are retained
+  as evidence. Both public small/large entry points reuse one templated core.
+- Changed the K tile from 16 to the GPTQ group size 128 and used 16x64 small-M
+  versus 32x64 large-M tiles. The dominant fix was loading each INT32 packed
+  word once and expanding its eight INT4 values in registers instead of eight
+  redundant global loads.
+- Representative `K=N=5120` latency after the packed-word fix, native versus
+  repacked Triton in milliseconds: `M=1 0.139/0.118`, `M=8 0.174/0.118`,
+  `M=64 0.269/0.145`, `M=65 0.314/0.168`, `M=128 0.357/0.252`, and
+  `M=512 1.313/0.747`. Outputs matched within the existing BF16 tolerance;
+  this prototype remains opt-in because it is still `1.18x-1.87x` slower.
+- Formal native/Triton GPU regression:
+  `tests/test_gptq_native.py tests/test_gptq_kernel.py` passed (`29 passed`).
+  `git diff --check` passed before the test run.
+- Final server regression with the temporary native extension on the package
+  path: `205 passed, 1 warning` in 36.24 seconds. `compileall` and
+  `git diff --check` passed immediately before it.
+
+## 2026-07-23 W4 tile investigation and task consolidation
+
+- Triton autotune on `K=N=5120` selected `16x32x32` for M=1/8,
+  `16x64x32` for M=64/128, and `32x128x32` with eight warps for M=512.
+- A native K=32-only variant improved M=512 to about 1.00 ms but regressed
+  small/mid M. The retained source specializes small to `16x64x128` and large
+  to `32x128x32`, with two accumulators per warp for the large tile.
+- The specialized large tile measured about 0.899 ms at M=512 versus Triton
+  0.748 ms (1.20x slower). The retained small tile measured about 0.139 ms at
+  M=1 versus Triton 0.118 ms (1.18x slower). M=8/19/32/64 remained farther
+  behind. An attempted `16x32x32` native small tile was rejected after
+  measuring 1.54x-2.66x slower.
+- `cuobjdump --dump-resource-usage` reported 40 registers and 24/32 KiB shared
+  memory for the prior small/large variants; no register spill was observed.
+  Nsight Compute is not installed, and no profiler package was added.
+- Queried the official vLLM main tree and located its current stable-ABI Marlin
+  implementation under `csrc/libtorch_stable/quantization/marlin/`. The
+  source design uses a load-time Marlin layout and multi-stage async
+  global-to-shared pipeline; detailed porting is deferred rather than copied
+  incompletely.
+- Consolidated TASK-002 and TASK-007 through TASK-011. Completed extraction
+  tasks were archived completed; unresolved Graph/GDN/goodput gates were moved
+  here before the older tasks were archived as superseded.
+- Restored the retained small/large source after rejecting the 16x32x32
+  candidate and rebuilt the extension successfully with CUDA 12.8 / SM89.
+- Final required hook passed: `git diff --check`, `compileall`, and structure
+  policy. Final native/GPTQ focused GPU regression passed (`29 passed`).
+- A read-only documentation check verified 126 Markdown files with no missing
+  relative links. Exactly one active task and one `[>]` plan item remain.
+- Redacted secret scan across all changed files reported clean.

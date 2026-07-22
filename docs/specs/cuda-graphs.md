@@ -316,3 +316,6 @@ candidate selection, padding metadata, and fallback reasons.
 - 2026-07-23: Fixed Piecewise capacity to follow the configured token budget up
   to 512 instead of being truncated by decode concurrency, and retained the
   requirement for captured-key/replay evidence beyond execution-mode labels.
+- 2026-07-23: Recorded GPU semantic dispatch evidence (one PIECEWISE prefill,
+  seven FULL decode, zero EAGER) while keeping per-region replay proof open
+  because Inductor still reports CPU-argument capture skips.

@@ -408,3 +408,7 @@ engine.
   `last_execution_mode` and speculative-stat side channels.
 - 2026-07-23: Made runner orchestration and batch-builder delegation explicit
   structural requirements after later optimizations expanded the facade.
+- 2026-07-23: Archived typed-batch, state-manager, speculator, semantic-Graph,
+  and typed-metrics execution tasks after GPU integration; consolidated the
+  remaining Graph/GDN/goodput acceptance gates into TASK-20260722-012 without
+  changing component ownership.
