@@ -91,6 +91,15 @@ class OpenAIChatBackend:
                         result.completion_tokens = usage.get("completion_tokens", 0)
                         details = usage.get("prompt_tokens_details") or {}
                         result.cached_tokens = details.get("cached_tokens")
+                        speculative = (
+                            usage.get("speculative_tokens_details")
+                            or usage.get("completion_tokens_details")
+                            or {}
+                        )
+                        result.accepted_tokens = speculative.get(
+                            "accepted_prediction_tokens",
+                            speculative.get("accepted_tokens"),
+                        )
                         result.token_count_source = "usage"
                     choices = event.get("choices", [])
                     if not choices:

@@ -3,12 +3,19 @@ import math
 import random
 from time import perf_counter
 
-from benchmarks.backends.openai_chat import OpenAIChatBackend
+from typing import Protocol
+
 from benchmarks.models import ChatRequest, RequestResult
 
 
+class RequestBackend(Protocol):
+    async def run(
+        self, request: ChatRequest, scheduled_s: float
+    ) -> RequestResult: ...
+
+
 async def run_warmups(
-    backend: OpenAIChatBackend,
+    backend: RequestBackend,
     requests: list[ChatRequest],
     count: int,
 ) -> None:
@@ -26,7 +33,7 @@ async def run_warmups(
 
 
 async def run_load(
-    backend: OpenAIChatBackend,
+    backend: RequestBackend,
     requests: list[ChatRequest],
     max_concurrency: int,
     request_rate: float,

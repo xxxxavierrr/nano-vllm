@@ -225,6 +225,9 @@ def main(argv: list[str] | None = None):
     mixed_seconds = 0.0
     mixed_tokens = 0
     mixed_steps = 0
+    scheduled_actual_tokens = 0
+    scheduled_padded_tokens = 0
+    running_request_seconds = 0.0
     speculative_stats = {
         "drafted_tokens": 0,
         "proposed_tokens": 0,
@@ -283,13 +286,18 @@ def main(argv: list[str] | None = None):
         step_seconds = step_finished - step_started
         execution_mode = runner_metrics.execution_mode
         step_speculative = runner_metrics.speculative
+        scheduled_actual_tokens += runner_metrics.real_tokens
+        scheduled_padded_tokens += runner_metrics.padded_tokens
+        running_request_seconds += runner_metrics.num_requests * step_seconds
         for key in speculative_stats:
             runner_key = key.removesuffix("_tokens")
             speculative_stats[key] += getattr(step_speculative, runner_key)
         mode_stats = execution_mode_stats[execution_mode]
         mode_stats["steps"] += 1
         mode_stats["seconds"] += step_seconds
-        mode_stats["tokens"] += scheduled_tokens
+        mode_stats["tokens"] += runner_metrics.real_tokens
+        mode_stats.setdefault("padded_tokens", 0)
+        mode_stats["padded_tokens"] += runner_metrics.padded_tokens
 
         max_batch_size = max(max_batch_size, len(seqs))
         max_batched_tokens = max(max_batched_tokens, scheduled_tokens)
@@ -342,6 +350,7 @@ def main(argv: list[str] | None = None):
     tpot_ms = [value * 1000 for value in tpots]
     e2e_ms = [value * 1000 for value in e2es]
     good_requests = 0
+    good_output_tokens = 0
     slo_enabled = any(value is not None for value in (args.ttft_slo_ms, args.tpot_slo_ms, args.e2e_slo_ms))
     for index, record in enumerate(finished_records):
         request_tpot_ms = 0.0
@@ -353,6 +362,8 @@ def main(argv: list[str] | None = None):
             and (args.e2e_slo_ms is None or e2e_ms[index] <= args.e2e_slo_ms)
         )
         good_requests += int(meets_slo)
+        if meets_slo:
+            good_output_tokens += len(record.token_times_s)
 
     model = llm.model_runner.model
     parameter_bytes = sum(param.numel() * param.element_size() for param in model.parameters())
@@ -418,6 +429,7 @@ def main(argv: list[str] | None = None):
             "input_token_per_s": total_input_tokens / duration,
             "output_token_per_s": actual_output_tokens / duration,
             "total_token_per_s": (total_input_tokens + actual_output_tokens) / duration,
+            "accepted_token_per_s": speculative_stats["accepted_tokens"] / duration,
         },
         "latency_ms": {
             "ttft": distribution(ttfts, 1000),
@@ -492,6 +504,15 @@ def main(argv: list[str] | None = None):
             "prefix_cache_enabled": config.enable_prefix_cache,
             "max_batch_size": max_batch_size,
             "max_batched_tokens": max_batched_tokens,
+            "average_running_requests": running_request_seconds / duration,
+            "scheduled_actual_tokens": scheduled_actual_tokens,
+            "scheduled_padded_tokens": scheduled_padded_tokens,
+            "padding_ratio": (
+                (scheduled_padded_tokens - scheduled_actual_tokens)
+                / scheduled_padded_tokens
+                if scheduled_padded_tokens
+                else 0.0
+            ),
             "cached_prompt_tokens": cached_prompt_tokens,
             "prefix_cache_hit_rate": cached_prompt_tokens / total_input_tokens if total_input_tokens else 0.0,
         },
@@ -526,6 +547,11 @@ def main(argv: list[str] | None = None):
             "e2e_ms": args.e2e_slo_ms,
             "good_requests": good_requests if slo_enabled else None,
             "goodput_request_per_s": good_requests / duration if slo_enabled else None,
+            "good_output_tokens": good_output_tokens if slo_enabled else None,
+            "goodput_output_token_per_s": (
+                good_output_tokens / duration if slo_enabled else None
+            ),
+            "attainment": good_requests / args.num_requests if slo_enabled else None,
         },
     }
     if args.request_details:

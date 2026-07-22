@@ -37,3 +37,20 @@
 - Audited current source/tests for FP8 KV, indexed speculative state, lossless
   rejection sampling, GPTQ repack, W4A8, and benchmark metrics; corrected the
   roadmap to distinguish implemented-pending-validation from not implemented.
+
+## 2026-07-22 atomic baseline and goodput implementation
+
+- Checked tracked/untracked changes for common credential patterns;
+  `git diff --check` and `compileall` passed before splitting.
+- Created four local-only commits: indexed DeltaNet branches, lossless
+  rejection sampling, GPTQ runtime repack, and the goodput-first roadmap.
+- Ran focused pre-commit suites: state `19 passed, 16 skipped`; sampler
+  `5 passed`; GPTQ `14 passed, 17 skipped`. CUDA skips remain pending.
+- Implemented schema v3, planned-arrival SLO timing, service/client latency,
+  SLO-good output tokens, accepted-token reporting, time-weighted occupancy,
+  scheduled actual/padded tokens, adaptive offered-load sweep, and optional
+  `nvidia-smi` telemetry with explicit missing provenance.
+- Ran the full CPU/Mock goodput suite: `12 passed`.
+- `compileall` and `git diff --check` passed after the goodput changes.
+- No package installation, model download, GPU command, server command, or
+  push was performed.

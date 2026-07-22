@@ -33,7 +33,15 @@ def print_summary(result: dict):
     print(f"Output token throughput: {throughput['output_token_per_s']:.2f} tok/s")
     print(f"Total token throughput:  {throughput['total_token_per_s']:.2f} tok/s")
     print("\n--- Latency ---")
-    for name in ("ttft", "tpot", "inter_chunk", "e2e", "client_queue"):
+    for name in (
+        "ttft",
+        "service_ttft",
+        "tpot",
+        "inter_chunk",
+        "e2e",
+        "service_e2e",
+        "client_queue",
+    ):
         print_distribution(name, metrics["latency_ms"][name])
     print("\n--- Tokens / Cache ---")
     cache_rate = tokens["prefix_cache_hit_rate"]
@@ -48,6 +56,7 @@ def print_summary(result: dict):
     if metrics["slo"]["enabled"]:
         print(
             f"SLO goodput: {metrics['slo']['goodput_request_per_s']:.2f} req/s "
+            f"/ {metrics['slo']['goodput_output_token_per_s']:.2f} tok/s "
             f"({metrics['slo']['good_requests']}/{requests['total']})"
         )
 
@@ -58,11 +67,17 @@ def request_details(results: list[RequestResult]) -> list[dict]:
         item = asdict(result)
         item["succeeded"] = result.succeeded
         item["ttft_ms"] = (
+            (result.first_content_s - result.scheduled_s) * 1000
+            if result.first_content_s is not None
+            else None
+        )
+        item["service_ttft_ms"] = (
             (result.first_content_s - result.started_s) * 1000
             if result.first_content_s is not None
             else None
         )
-        item["e2e_ms"] = (result.finished_s - result.started_s) * 1000
+        item["e2e_ms"] = (result.finished_s - result.scheduled_s) * 1000
+        item["service_e2e_ms"] = (result.finished_s - result.started_s) * 1000
         item["client_queue_ms"] = (result.started_s - result.scheduled_s) * 1000
         details.append(item)
     return details

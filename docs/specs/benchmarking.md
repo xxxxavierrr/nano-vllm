@@ -86,10 +86,13 @@ goodput_output_token_per_s  = output tokens belonging to SLO-good requests / T
 average_running_requests    = integral(running_requests(t), dt) / T
 ```
 
-TTFT is request admission/start to first output token. TPOT is the per-request
-mean interval after the first token unless a result explicitly declares another
-definition. The raw event stream is retained so alternative distributions can
-be recomputed.
+Online SLO TTFT is planned client arrival to first output token, so client-side
+concurrency queueing is included. SLO E2E uses the same arrival origin. The
+schema also reports transport/service TTFT and E2E from actual HTTP dispatch,
+plus client queue latency, so saturation can be localized. TPOT is the
+per-request mean interval after the first token unless a result explicitly
+declares another definition. The raw event stream is retained so alternative
+distributions can be recomputed.
 
 ## Workload matrix
 
@@ -139,3 +142,5 @@ optimization comparison.
 - 2026-07-22: Created the goodput-first benchmark contract and made open-loop
   SLO capacity, scheduler occupancy, speculative acceptance, and GPU telemetry
   required evidence for the optimization roadmap.
+- 2026-07-22: Fixed online SLO timing at planned arrival, defined separate
+  service latency, and standardized schema v3 engine/GPU telemetry provenance.

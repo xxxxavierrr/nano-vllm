@@ -23,6 +23,7 @@ class RequestResult:
     finish_reason: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int = 0
+    accepted_tokens: int | None = None
     cached_tokens: int | None = None
     token_count_source: str = "approximate"
     text: str = ""
@@ -34,3 +35,14 @@ class RequestResult:
     @property
     def succeeded(self) -> bool:
         return self.error is None and self.status_code == 200 and self.saw_done
+
+
+@dataclass(frozen=True, slots=True)
+class EngineSnapshot:
+    """Optional implementation-neutral engine telemetry sampled during a run."""
+
+    timestamp_s: float
+    running_requests: int
+    scheduled_actual_tokens: int | None = None
+    scheduled_padded_tokens: int | None = None
+    accepted_tokens: int | None = None

@@ -18,11 +18,11 @@
 
 ## Remaining milestones in execution order
 
-- [>] Extend the framework-neutral benchmark schema and aggregation with
+- [x] Extend the framework-neutral benchmark schema and aggregation with
   accepted tokens/s, SLO-good output-token throughput, time-weighted running
   requests, scheduled actual/padded tokens, and GPU telemetry provenance; add
   an open-loop offered-load sweep for maximum SLO throughput.
-- [ ] Implement and validate Marlin-style W4A16 small-M and large-M kernels,
+- [>] Implement and validate Marlin-style W4A16 small-M and large-M kernels,
   selected by shape and SM89 capability, with GPTQ/AWQ load-time normalization.
 - [ ] Build the INT4 DSpark checkpoint by persisting real target-produced draft
   inputs, then loading the BF16 draft alone for calibration/reference. Never

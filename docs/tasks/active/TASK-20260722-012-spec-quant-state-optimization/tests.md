@@ -81,6 +81,13 @@ Implemented local evidence:
 - Scheduler/greedy compatibility and sampling tests pass in the focused CPU
   suite.
 - Python compilation and `git diff --check` pass.
+- Schema v3 aggregation tests prove planned-arrival TTFT/E2E includes client
+  queueing while service latency remains separately reported.
+- MockTransport exercises the complete online runner; a framework-neutral fake
+  backend exercises the load generator; deterministic sweep tests cover
+  exponential growth and binary refinement.
+- Fake-reader telemetry tests cover sampling/reporting without requiring
+  `nvidia-smi`; the focused goodput suite passes (`12 passed`).
 
 Deferred evidence:
 

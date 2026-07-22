@@ -1,5 +1,20 @@
 # Result
 
+## Delivered locally
+
+- Four pre-existing feature groups were separated into independently reviewed
+  local commits; nothing was pushed.
+- Benchmark schema v3 now measures SLO-good output-token throughput,
+  accepted-token throughput when provided, planned-arrival and service
+  latency, time-weighted client/engine occupancy, and actual versus padded
+  scheduled work.
+- `--mode online-sweep` performs offered-load growth and boundary refinement;
+  optional `nvidia-smi` telemetry records sampling provenance or an explicit
+  missing reason.
+
+GPU validation, kernel implementation, real DSpark calibration, and FP8
+DeltaNet state work remain active and are not claimed complete.
+
 Status: locally implemented; GPU validation pending.
 
 Delivered so far:

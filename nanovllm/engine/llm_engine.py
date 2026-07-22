@@ -27,6 +27,9 @@ class EngineStepStats:
     prefill_tokens: int
     decode_tokens: int
     execution_mode: str
+    actual_scheduled_tokens: int = 0
+    padded_scheduled_tokens: int = 0
+    running_requests: int = 0
     speculative_drafted_tokens: int = 0
     speculative_proposed_tokens: int = 0
     speculative_accepted_tokens: int = 0
@@ -140,6 +143,9 @@ class LLMEngine:
             batch.prefill_tokens,
             batch.decode_tokens,
             runner_metrics.execution_mode,
+            actual_scheduled_tokens=runner_metrics.real_tokens,
+            padded_scheduled_tokens=runner_metrics.padded_tokens,
+            running_requests=runner_metrics.num_requests,
             speculative_drafted_tokens=speculative.drafted,
             speculative_proposed_tokens=speculative.proposed,
             speculative_accepted_tokens=speculative.accepted,
