@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from nanovllm.engine.batch import (
@@ -11,7 +13,14 @@ from nanovllm.engine.batch import (
     SamplingMetadata,
 )
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.speculative import sample_from_logits
 from nanovllm.utils.context import forward_context
+
+
+@dataclass(slots=True)
+class DraftProposal:
+    token_ids: list[int]
+    logits: torch.Tensor
 
 
 class MTPProposer:
@@ -67,8 +76,14 @@ class MTPProposer:
         target_hidden_states: torch.Tensor,
         token_groups: list[list[int]],
         accepted_counts: list[int],
-    ) -> list[list[int] | None]:
+        temperatures: list[float],
+        generators: list[torch.Generator | None],
+    ) -> list[DraftProposal | None]:
         sampled_seqs = [seq for seq in seqs if seq.will_sample]
+        if len(temperatures) != len(sampled_seqs):
+            raise ValueError("MTP temperatures do not match sampled requests")
+        if len(generators) != len(sampled_seqs):
+            raise ValueError("MTP generators do not match sampled requests")
         hidden_parts = []
         next_token_ids = []
         positions = []
@@ -187,23 +202,59 @@ class MTPProposer:
             if not logits_indices:
                 return []
             sampled_hidden = mtp_hidden.index_select(0, logits_indices_tensor)
+            # The LM head consumes PreparedBatch.sampling.logits_indices and
+            # selects the sampled rows from the full packed MTP output.
             logits = self.target_model.compute_logits(mtp_hidden)
-            proposal_ids = logits.argmax(dim=-1)
+            proposal_ids = torch.tensor(
+                [
+                    sample_from_logits(
+                        row,
+                        temperature,
+                        generator=generator,
+                    )
+                    for row, temperature, generator in zip(
+                        logits, temperatures, generators
+                    )
+                ],
+                dtype=torch.long,
+                device=logits.device,
+            )
 
         draft_chains = [[token_id] for token_id in proposal_ids.tolist()]
+        logit_steps = [logits]
         for _ in range(1, self.num_steps):
-            proposal_ids, sampled_hidden, sampled_next_positions = (
+            proposal_ids, sampled_hidden, sampled_next_positions, logits = (
                 self._recursive_step(
                     sampled_seqs,
                     proposal_ids,
                     sampled_hidden,
                     sampled_next_positions,
                     use_kv_cache,
+                    temperatures,
+                    generators,
                 )
             )
+            logit_steps.append(logits)
             for chain, token_id in zip(draft_chains, proposal_ids.tolist()):
                 chain.append(token_id)
-        return draft_chains
+        return [
+            DraftProposal(
+                token_ids=chain,
+                logits=(
+                    torch.stack(
+                        [step[index] for step in logit_steps], dim=0
+                    ).detach()
+                    if temperatures[index] > 0
+                    else torch.empty(
+                        0,
+                        logits.shape[-1],
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    )
+                ),
+            )
+            for index, chain in enumerate(draft_chains)
+        ]
 
     def _recursive_step(
         self,
@@ -212,7 +263,9 @@ class MTPProposer:
         sampled_hidden: torch.Tensor,
         sampled_next_positions: list[int],
         use_kv_cache: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        temperatures: list[float],
+        generators: list[torch.Generator | None],
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int], torch.Tensor]:
         batch_size = len(sampled_seqs)
         positions = torch.tensor(
             sampled_next_positions,
@@ -278,9 +331,23 @@ class MTPProposer:
                 embeddings,
             )
             logits = self.target_model.compute_logits(sampled_hidden)
-            proposal_ids = logits.argmax(dim=-1)
+            proposal_ids = torch.tensor(
+                [
+                    sample_from_logits(
+                        row,
+                        temperature,
+                        generator=generator,
+                    )
+                    for row, temperature, generator in zip(
+                        logits, temperatures, generators
+                    )
+                ],
+                dtype=torch.long,
+                device=logits.device,
+            )
         return (
             proposal_ids,
             sampled_hidden,
             [position + 1 for position in sampled_next_positions],
+            logits,
         )

@@ -76,13 +76,6 @@ class LLMEngine:
             p.join()
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
-        if (
-            self.config.speculative_method == "mtp"
-            and sampling_params.temperature != 0
-        ):
-            raise ValueError(
-                "MTP v1 currently supports temperature=0 only"
-            )
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         if not prompt:

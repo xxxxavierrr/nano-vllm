@@ -30,6 +30,7 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.seed = sampling_params.seed
         self.finish_reason: str | None = None
 
     def __len__(self):
@@ -123,6 +124,8 @@ class Sequence:
             self.num_scheduled_tokens,
             self.block_table,
             self.draft_token_ids,
+            self.temperature,
+            self.seed,
             last_state,
         )
 
@@ -134,6 +137,8 @@ class Sequence:
             self.num_scheduled_tokens,
             self.block_table,
             self.draft_token_ids,
+            self.temperature,
+            self.seed,
             last_state,
         ) = state
         if isinstance(last_state, list):

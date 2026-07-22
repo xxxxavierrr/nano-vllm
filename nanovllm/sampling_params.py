@@ -6,6 +6,9 @@ class SamplingParams:
     temperature: float = 1.0
     max_tokens: int = 64
     ignore_eos: bool = False
+    seed: int | None = None
 
     def __post_init__(self):
         assert self.temperature >= 0, "temperature must be non-negative"
+        if self.seed is not None and self.seed < 0:
+            raise ValueError("seed must be non-negative")

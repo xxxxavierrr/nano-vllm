@@ -32,7 +32,10 @@ from nanovllm.engine.metrics import (
 )
 from nanovllm.engine.mtp_proposer import MTPProposer
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.speculative import GreedyAcceptance
+from nanovllm.engine.speculative import (
+    GreedyAcceptance,
+    RejectionSamplingAcceptance,
+)
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.deltanet_chunk import (
@@ -119,6 +122,9 @@ class ModelRunner:
             else None
         )
         self.acceptance_policy = GreedyAcceptance()
+        self.rejection_sampling_policy = RejectionSamplingAcceptance()
+        self.draft_logits: dict[int, torch.Tensor] = {}
+        self.request_generators: dict[int, torch.Generator] = {}
         if config.quantization == "fp8":
             quantize_fp8(self.model)
             torch.cuda.empty_cache()
@@ -275,6 +281,24 @@ class ModelRunner:
 
     def release_sequences(self, seq_ids):
         self.hybrid_state.release(seq_ids)
+        for seq_id in seq_ids:
+            self.draft_logits.pop(seq_id, None)
+            self.request_generators.pop(seq_id, None)
+
+    def _generator_for(self, seq: Sequence) -> torch.Generator:
+        generator = self.request_generators.get(seq.seq_id)
+        if generator is None:
+            generator = torch.Generator(
+                device=f"cuda:{self.config.device_ids[self.rank]}"
+            )
+            seed = (
+                seq.seed
+                if seq.seed is not None
+                else (torch.initial_seed() + seq.seq_id) % (2**63 - 1)
+            )
+            generator.manual_seed(seed)
+            self.request_generators[seq.seq_id] = generator
+        return generator
 
     @property
     def delta_state_capacity(self) -> int | None:
@@ -931,11 +955,6 @@ class ModelRunner:
         )
 
         use_speculative = self.speculator is not None
-        if use_speculative and any(seq.temperature != 0 for seq in sampled_seqs):
-            raise ValueError(
-                "MTP v1 currently supports greedy decoding only "
-                "(temperature=0)"
-            )
         has_verification = use_speculative and any(
             seq.is_speculative for seq in sampled_seqs
         )
@@ -972,7 +991,9 @@ class ModelRunner:
             hidden_states = self.run_model(prepared, descriptor)
             if not sampled_seqs:
                 if use_speculative:
-                    self.speculator.propose(seqs, hidden_states, [], [])
+                    self.speculator.propose(
+                        seqs, hidden_states, [], [], [], []
+                    )
                 return step_output([] if self.rank == 0 else None)
 
             logits = self.model.compute_logits(hidden_states)
@@ -1006,12 +1027,32 @@ class ModelRunner:
                         logit_offset + num_verification_logits
                     ]
                     logit_offset += num_verification_logits
-                    target_tokens = (
-                        verification_logits.argmax(dim=-1).tolist()
-                    )
-                    outputs, accepted = self.acceptance_policy.accept(
-                        target_tokens, seq.draft_token_ids
-                    )
+                    if seq.temperature == 0:
+                        target_tokens = (
+                            verification_logits.argmax(dim=-1).tolist()
+                        )
+                        outputs, accepted = self.acceptance_policy.accept(
+                            target_tokens, seq.draft_token_ids
+                        )
+                        self.draft_logits.pop(seq.seq_id, None)
+                    else:
+                        draft_logits = self.draft_logits.pop(
+                            seq.seq_id, None
+                        )
+                        if draft_logits is None:
+                            raise RuntimeError(
+                                "probabilistic MTP verification is missing "
+                                "draft logits"
+                            )
+                        outputs, accepted = (
+                            self.rejection_sampling_policy.accept(
+                                verification_logits,
+                                draft_logits,
+                                seq.draft_token_ids,
+                                seq.temperature,
+                                generator=self._generator_for(seq),
+                            )
+                        )
                     token_groups.append(outputs)
                     accepted_counts.append(accepted)
                 else:
@@ -1039,16 +1080,31 @@ class ModelRunner:
                 hidden_states,
                 token_groups,
                 accepted_counts,
+                [seq.temperature for seq in sampled_seqs],
+                [self._generator_for(seq) for seq in sampled_seqs],
             )
             if len(proposals) != len(sampled_seqs):
                 raise ValueError("MTP proposal count does not match sampled requests")
             proposed = sum(
                 len(seq.draft_token_ids) for seq in sampled_seqs
             )
+            next_draft_token_ids: list[list[int] | None] = []
+            for seq, proposal in zip(sampled_seqs, proposals):
+                if proposal is None:
+                    next_draft_token_ids.append(None)
+                    self.draft_logits.pop(seq.seq_id, None)
+                else:
+                    next_draft_token_ids.append(proposal.token_ids)
+                    if seq.temperature > 0:
+                        self.draft_logits[seq.seq_id] = proposal.logits
+                    else:
+                        self.draft_logits.pop(seq.seq_id, None)
             accepted = sum(accepted_counts)
             speculative_metrics = SpeculativeStepMetrics(
                 drafted=sum(
-                    len(chain) for chain in proposals if chain is not None
+                    len(proposal.token_ids)
+                    for proposal in proposals
+                    if proposal is not None
                 ),
                 proposed=proposed,
                 accepted=accepted,
@@ -1088,7 +1144,7 @@ class ModelRunner:
                 SpeculativeBatchOutput(
                     token_ids=token_groups,
                     accepted_counts=accepted_counts,
-                    next_draft_token_ids=proposals,
+                    next_draft_token_ids=next_draft_token_ids,
                 ),
                 speculative_metrics,
             )
