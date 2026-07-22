@@ -92,8 +92,18 @@ Implemented local evidence:
   SM89 gating, the `M=64/65` shape boundary, normalized layout rejection, and
   per-row/per-group W4A8 activation quantization (`32 passed, 17 CUDA skipped`
   with the wider GPTQ/config/API regression set).
+- DSpark local tests cover config/forward shapes, strict missing/unknown weight
+  mapping, append/resume/cache hashes, FP32 Hessian accumulation, GPTQ packing
+  and reconstruction, sharded checkpoint index/config, dry-run projection, and
+  a generated linear loaded by the production GPTQ loader (`20 passed, 1 CUDA
+  skipped` with GPTQ regressions).
 
 Deferred evidence:
+
+- The calibration model is a strict local shell. Real Avesed tensor mapping,
+  DFlash/Markov logits, per-layer reconstruction, 8.8 GB BF16 calibration time,
+  final draft size, and online acceptance/goodput are all pending; synthetic
+  round-trip is not counted as real-model compatibility.
 
 - New recurrent and causal-conv prefix-state CUDA tests are written but skipped
   locally because CUDA is unavailable.

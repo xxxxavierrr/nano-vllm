@@ -75,3 +75,16 @@
   installed. Normal PEP 517 builds provision setuptools from `pyproject.toml`;
   opt-in CUDA builds must use an environment that already has matching PyTorch
   and CUDA (for example a no-build-isolation server build).
+
+## 2026-07-22 DSpark calibration tooling
+
+- Added a draft-only DFlash/Markov/confidence calibration shell, strict
+  streaming safetensors loader, resumable/hash-verified calibration cache, and
+  dry-run size projection. No target model is constructed by this path.
+- Added an in-repository symmetric GPTQ INT4 quantizer: group size 128,
+  128-column blocks, FP32 Hessian, 1% diagonal damping, sequential error
+  propagation, GPTQ zero-point packing, and current-loader tensor names.
+- Synthetic cache/model/checkpoint and production-loader compatibility suite:
+  `20 passed, 1 skipped`; the skip requires CUDA and is not DSpark evidence.
+- `compileall` and `git diff --check` passed. No real BF16 draft was loaded, no
+  model was downloaded, and no GPU/server/push command was run.

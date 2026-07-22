@@ -163,6 +163,28 @@ for that exact cell. On the available GPU, compare runnable INT4 variants
 (group size and mixed-precision exceptions) and use offline BF16 agreement as
 the quantization-quality guardrail.
 
+### Local DSpark calibration boundary
+
+The repository tooling is split into four CPU-testable contracts:
+
+1. `DSparkConfig` and `DSparkCalibrationModel` describe draft-only DFlash
+   layers plus Markov and confidence heads without constructing the target.
+2. `CalibrationCacheWriter/Reader` persist append-only safetensors shards and
+   an atomic JSON manifest containing flattened tokens, positions,
+   `cu_seqlens`, target hidden states, dtype/shape, and provenance.
+3. A strict mapping table converts supported author checkpoint prefixes to the
+   calibration model; missing required or unknown mapped tensors fail before
+   quantization.
+4. The in-repository GPTQ tool accumulates FP32 Hessian statistics, applies 1%
+   diagonal damping, quantizes symmetric INT4 in 128-column blocks and
+   group-size 128, and writes `qweight/scales/qzeros/g_idx` plus index/config
+   metadata accepted by the runtime loader.
+
+The local synthetic round-trip validates file and mathematical contracts only.
+Real Avesed tensor names, DFlash semantics, per-layer reconstruction, and
+acceptance remain explicit server gates; the tool must not claim that a
+synthetic model proves checkpoint compatibility.
+
 ## Goodput experiment design
 
 Microbenchmarks remain phase-local diagnostics. The production decision uses:

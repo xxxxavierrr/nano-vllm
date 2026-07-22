@@ -15,6 +15,11 @@
   Triton fallback, SM89/layout guards, small/large-M W4A16 entry points, and a
   disabled experimental large-M W4A8 entry point. It is source-complete for
   later server iteration, not performance-validated.
+- DSpark offline tooling can now persist target-produced calibration tensors,
+  stream a draft-only BF16 checkpoint, run layer-at-a-time CPU GPTQ, and emit a
+  sharded group-128 checkpoint in the production loader's packed format. Only
+  a synthetic model has been exercised locally; real checkpoint compatibility
+  and acceptance remain pending.
 
 GPU validation, kernel implementation, real DSpark calibration, and FP8
 DeltaNet state work remain active and are not claimed complete.

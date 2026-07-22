@@ -55,6 +55,17 @@ must agree.
   time-weighted running requests, scheduled tokens per step, and TTFT/TPOT p50
   and p99. Acceptance metrics diagnose speculation but never select a winner
   without end-to-end SLO goodput.
+- DSpark/DFlash draft calibration is a sequential offline workflow on the
+  24 GB target: persist target-produced hidden-state/token inputs first, unload
+  the target, then load the BF16 draft alone for reference and GPTQ
+  calibration. The online proposer consumes only the resulting packed INT4
+  draft.
+- Calibration caches are resumable, sharded, self-describing, and preserve
+  flattened token data, sequence boundaries, positions, target hidden states,
+  and source/checkpoint provenance without embedding the target model itself.
+- Draft checkpoint conversion owns strict name mapping, Markov/confidence-head
+  preservation, per-linear calibration, and output compatibility with the
+  production GPTQ loader. Unknown or incomplete weights fail conversion.
 
 ## Scope
 
@@ -63,13 +74,16 @@ must agree.
   ModelRunner integration, GDN state handling, CUDA Graphs, and benchmarks.
 - Current vLLM V1 speculative-decoding conventions and rejection of obsolete
   V0 worker architecture.
+- Offline DSpark/DFlash calibration model, cache, weight mapping, and packed
+  INT4 checkpoint generation tooling. Runtime DSpark tree proposal remains a
+  later GPU-integrated milestone.
 
 ## Non-goals
 
 - Reintroducing vLLM V0 `SpecDecodeWorker`/multi-step-worker architecture.
 - Top-k/top-p or other transforms until the same transform is implemented and
   validated identically for target and draft distributions.
-- Draft-tree methods such as DSpark/DDTree unless added by a later task.
+- Enabling an unvalidated DSpark tree proposer in the online engine.
 
 ## Acceptance criteria
 
@@ -212,3 +226,6 @@ INT4 draft; published BF16 acceptance cannot be reported as locally measured.
 - 2026-07-22: Added lossless probability-ratio acceptance, residual
   `(p-q)+` recovery sampling, shared logits transforms, and per-request RNG as
   required probabilistic MTP behavior.
+- 2026-07-22: Added DSpark/DFlash offline cache, strict checkpoint mapping, and
+  in-repository GPTQ draft conversion to scope; online tree proposal remains
+  gated on real checkpoint/GPU validation.

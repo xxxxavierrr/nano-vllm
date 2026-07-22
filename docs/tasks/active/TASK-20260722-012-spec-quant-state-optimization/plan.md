@@ -27,12 +27,17 @@
   fallback. CUDA compilation/correctness/performance remain a later GPU gate.
 - [ ] Validate and optimize the native W4A16/W4A8 implementation on SM89,
   including tensor-core dataflow, Graph behavior, and target shapes.
-- [>] Build the INT4 DSpark checkpoint by persisting real target-produced draft
+- [x] Implement the local DSpark calibration shell, resumable sharded cache,
+  strict streaming weight mapping, FP32-Hessian GPTQ quantizer, dry-run memory
+  projection, and synthetic production-loader checkpoint round-trip.
+- [ ] Build the real INT4 DSpark checkpoint by persisting target-produced draft
   inputs, then loading the BF16 draft alone for calibration/reference. Never
   plan an online BF16-draft-plus-target cell on the 24 GB GPU.
 - [ ] Record the first runnable paired-AWQ-target + INT4-draft baseline,
   including kernel shapes, speculative acceptance, state/KV memory, TTFT/TPOT
   p50/p99, goodput, scheduler occupancy, utilization, and stable concurrency.
+- [>] Strengthen local zero-replay/state-prefix, probabilistic sampler property,
+  and unified FP8 KV capacity-report coverage before adding FP8 DeltaNet state.
 - [ ] Validate the already implemented DeltaNet branch-state path and prove
   zero rejected-prefix target replay under eager, Full, and Piecewise Graph.
 - [ ] Validate the already implemented probability-difference sampler on GPU;
