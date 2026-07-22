@@ -90,11 +90,13 @@ def _packed_causal_conv_state_kernel(
     input_ptr,
     cu_seqlens_ptr,
     slots_ptr,
+    branch_slots_ptr,
     state_ptr,
     D: tl.constexpr,
     KERNEL: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    BRANCH_STRIDE: tl.constexpr,
 ):
     """Commit the last K inputs after convolution consumed the old state."""
     sequence = tl.program_id(axis=0)
@@ -103,6 +105,7 @@ def _packed_causal_conv_state_kernel(
     end = tl.load(cu_seqlens_ptr + sequence + 1)
     length = end - begin
     slot = tl.load(slots_ptr + sequence)
+    first_branch = tl.load(branch_slots_ptr + sequence * BRANCH_STRIDE)
 
     channels = channel_block * BLOCK_D + tl.arange(0, BLOCK_D)
     positions = tl.arange(0, BLOCK_K)
@@ -143,7 +146,83 @@ def _packed_causal_conv_state_kernel(
         + (slot * D + channels[:, None]) * KERNEL
         + positions[None, :],
         updated,
-        mask=channel_mask[:, None] & position_mask[None, :],
+        mask=(
+            channel_mask[:, None]
+            & position_mask[None, :]
+            & (first_branch < 0)
+        ),
+    )
+
+
+@triton.jit
+def _packed_causal_conv_branch_state_kernel(
+    input_ptr,
+    cu_seqlens_ptr,
+    slots_ptr,
+    branch_slots_ptr,
+    state_ptr,
+    D: tl.constexpr,
+    KERNEL: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BRANCH_STRIDE: tl.constexpr,
+):
+    """Write the convolution state after every speculative input prefix."""
+    sequence = tl.program_id(axis=0)
+    channel_block = tl.program_id(axis=1)
+    prefix = tl.program_id(axis=2)
+    begin = tl.load(cu_seqlens_ptr + sequence)
+    end = tl.load(cu_seqlens_ptr + sequence + 1)
+    prefix_length = prefix + 1
+    branch_slot = tl.load(
+        branch_slots_ptr + sequence * BRANCH_STRIDE + prefix
+    )
+    branch_active = (branch_slot >= 0) & (begin + prefix < end)
+
+    channels = channel_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    positions = tl.arange(0, BLOCK_K)
+    channel_mask = channels < D
+    position_mask = positions < KERNEL
+    concatenated_position = prefix_length + positions
+
+    # A branch is built directly from the immutable base state plus the input
+    # prefix.  Candidate branches never depend on one another and can be
+    # selected by index after target verification.
+    base_slot = tl.load(slots_ptr + sequence)
+    old_state = tl.load(
+        state_ptr
+        + (base_slot * D + channels[:, None]) * KERNEL
+        + concatenated_position[None, :],
+        mask=(
+            branch_active
+            & channel_mask[:, None]
+            & position_mask[None, :]
+            & (concatenated_position[None, :] < KERNEL)
+        ),
+        other=0.0,
+    )
+    input_position = begin + concatenated_position - KERNEL
+    new_input = tl.load(
+        input_ptr + input_position[None, :] * D + channels[:, None],
+        mask=(
+            branch_active
+            & channel_mask[:, None]
+            & position_mask[None, :]
+            & (concatenated_position[None, :] >= KERNEL)
+        ),
+        other=0.0,
+    )
+    updated = tl.where(
+        concatenated_position[None, :] < KERNEL,
+        old_state,
+        new_input,
+    )
+    tl.store(
+        state_ptr
+        + (branch_slot * D + channels[:, None]) * KERNEL
+        + positions[None, :],
+        updated,
+        mask=branch_active & channel_mask[:, None] & position_mask[None, :],
     )
 
 
@@ -152,6 +231,7 @@ def packed_causal_conv1d(
     weight: torch.Tensor,
     cu_seqlens: torch.Tensor,
     slots: torch.Tensor,
+    branch_slots: torch.Tensor,
     state_slab: torch.Tensor,
     max_seqlen: int,
 ) -> torch.Tensor:
@@ -174,6 +254,17 @@ def packed_causal_conv1d(
         slots,
         operation="packed causal convolution",
     )
+    if (
+        branch_slots.dtype is not torch.int32
+        or branch_slots.ndim != 2
+        or branch_slots.shape[0] != num_sequences
+        or not branch_slots.is_cuda
+        or not branch_slots.is_contiguous()
+    ):
+        raise ValueError(
+            "packed causal convolution branch slots must be contiguous CUDA "
+            "int32 [sequences, prefixes]"
+        )
     if tokens <= 0 or num_sequences <= 0 or max_seqlen <= 0:
         raise ValueError("packed causal convolution requires a non-empty batch")
     if not all(
@@ -211,11 +302,33 @@ def packed_causal_conv1d(
         inputs,
         cu_seqlens,
         slots,
+        branch_slots,
         state_slab,
         D=channels,
         KERNEL=kernel_size,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
+        BRANCH_STRIDE=branch_slots.stride(0),
+        num_warps=4,
+        num_stages=2,
+    )
+    _packed_causal_conv_branch_state_kernel[
+        (
+            num_sequences,
+            triton.cdiv(channels, block_d),
+            branch_slots.shape[1],
+        )
+    ](
+        inputs,
+        cu_seqlens,
+        slots,
+        branch_slots,
+        state_slab,
+        D=channels,
+        KERNEL=kernel_size,
+        BLOCK_D=block_d,
+        BLOCK_K=block_k,
+        BRANCH_STRIDE=branch_slots.stride(0),
         num_warps=4,
         num_stages=2,
     )
@@ -293,6 +406,7 @@ def _gated_delta_recurrent_kernel(
     cu_seqlens_ptr,
     sequence_indices_ptr,
     slots_ptr,
+    branch_slots_ptr,
     state_ptr,
     output_ptr,
     H: tl.constexpr,
@@ -300,6 +414,7 @@ def _gated_delta_recurrent_kernel(
     V: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_V: tl.constexpr,
+    BRANCH_STRIDE: tl.constexpr,
 ):
     """Run an indexed subset of sequences from one packed token buffer."""
     value_block = tl.program_id(axis=0)
@@ -311,6 +426,7 @@ def _gated_delta_recurrent_kernel(
     begin = tl.load(cu_seqlens_ptr + sequence)
     end = tl.load(cu_seqlens_ptr + sequence + 1)
     slot = tl.load(slots_ptr + sequence)
+    first_branch = tl.load(branch_slots_ptr + sequence * BRANCH_STRIDE)
 
     offs_k = tl.arange(0, BLOCK_K)
     offs_v = value_block * BLOCK_V + tl.arange(0, BLOCK_V)
@@ -355,12 +471,35 @@ def _gated_delta_recurrent_kernel(
             output,
             mask=offs_v < V,
         )
+        local_token = token - begin
+        branch_index = tl.minimum(local_token, BRANCH_STRIDE - 1)
+        branch_slot = tl.load(
+            branch_slots_ptr + sequence * BRANCH_STRIDE + branch_index
+        )
+        branch_offsets = (
+            (branch_slot * H + head) * K * V
+            + offs_k[:, None] * V
+            + offs_v[None, :]
+        )
+        tl.store(
+            state_ptr + branch_offsets,
+            state,
+            mask=(
+                (branch_slot >= 0)
+                & (offs_k[:, None] < K)
+                & (offs_v[None, :] < V)
+            ),
+        )
         token += 1
 
     tl.store(
         state_ptr + state_offsets,
         state,
-        mask=(offs_k[:, None] < K) & (offs_v[None, :] < V),
+        mask=(
+            (first_branch < 0)
+            & (offs_k[:, None] < K)
+            & (offs_v[None, :] < V)
+        ),
     )
 
 
@@ -373,6 +512,7 @@ def _launch_recurrent(
     cu_seqlens: torch.Tensor,
     sequence_indices: torch.Tensor,
     slots: torch.Tensor,
+    branch_slots: torch.Tensor,
     state: torch.Tensor,
     output: torch.Tensor,
 ) -> None:
@@ -395,6 +535,7 @@ def _launch_recurrent(
         cu_seqlens,
         sequence_indices,
         slots,
+        branch_slots,
         state,
         output,
         H=heads,
@@ -402,6 +543,7 @@ def _launch_recurrent(
         V=value_dim,
         BLOCK_K=block_k,
         BLOCK_V=block_v,
+        BRANCH_STRIDE=branch_slots.stride(0),
         num_warps=1,
         num_stages=3,
     )

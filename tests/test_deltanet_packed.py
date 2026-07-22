@@ -59,6 +59,7 @@ def test_gated_delta_packed_all_recurrent_matches_reference():
         empty,
         torch.arange(len(lengths), device="cuda", dtype=torch.int32),
         slots,
+        torch.full((len(lengths), 1), -1, device="cuda", dtype=torch.int32),
         actual_state,
     )
     torch.testing.assert_close(actual, torch.cat(expected_parts), rtol=1e-4, atol=1e-4)

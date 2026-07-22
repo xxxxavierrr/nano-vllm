@@ -8,7 +8,7 @@ MIB = 2**20
 
 def make_plan(
     *,
-    state_copies: int = 2,
+    state_copies: int = 5,
     max_model_len: int = 256,
     max_num_seqs: int = 8,
     speculative_tokens: int = 3,
@@ -25,19 +25,19 @@ def make_plan(
     )
 
 
-def test_short_context_supports_eight_mtp_slots():
+def test_prefix_branch_slots_are_included_in_request_capacity():
     plan = make_plan()
-    assert plan.capacity == 8
-    assert plan.state_bytes_per_sequence == int(295.5 * MIB)
+    assert plan.capacity == 3
+    assert plan.state_bytes_per_sequence == int(738.75 * MIB)
     assert plan.kv_blocks_per_sequence == 2
-    assert plan.minimum_kv_blocks == 16
+    assert plan.minimum_kv_blocks == 6
 
 
 def test_long_context_reduces_capacity_instead_of_starving_kv():
     plan = make_plan(max_model_len=4096)
-    assert plan.capacity == 4
+    assert plan.capacity == 2
     assert plan.kv_blocks_per_sequence == 17
-    assert plan.minimum_kv_blocks == 68
+    assert plan.minimum_kv_blocks == 34
 
 
 def test_non_speculative_state_needs_one_copy_and_no_lookahead():

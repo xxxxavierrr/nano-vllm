@@ -177,6 +177,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         chunk_sequences: torch.Tensor,
         recurrent_sequences: torch.Tensor,
         state_slots: torch.Tensor,
+        branch_state_slots: torch.Tensor,
         recurrent_state_slab: torch.Tensor,
         max_seqlen_q: int,
     ) -> torch.Tensor:
@@ -186,6 +187,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             self.conv1d.weight,
             cu_seqlens,
             state_slots,
+            branch_state_slots,
             conv_state_slab,
             max_seqlen_q,
         )
@@ -221,6 +223,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             chunk_sequences,
             recurrent_sequences,
             state_slots,
+            branch_state_slots,
             recurrent_state_slab,
         )
         return core.to(projected_qkv.dtype)
@@ -251,6 +254,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             metadata.chunk_sequences,
             metadata.recurrent_sequences,
             metadata.state_slots,
+            metadata.branch_state_slots,
             metadata.recurrent_slab[self.state_idx],
             context.attention.max_seqlen_q,
         )

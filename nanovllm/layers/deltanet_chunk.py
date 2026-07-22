@@ -386,6 +386,7 @@ def _validate_packed_partition(
     chunk_sequences: torch.Tensor,
     recurrent_sequences: torch.Tensor,
     slots: torch.Tensor,
+    branch_slots: torch.Tensor,
 ) -> None:
     _validate_packed_metadata(
         cu_seqlens,
@@ -415,6 +416,17 @@ def _validate_packed_partition(
         raise ValueError("cu_chunks must match indexed chunk sequences")
     if chunk_sequences.numel() + recurrent_sequences.numel() != slots.numel():
         raise ValueError("packed partition must cover every sequence")
+    if (
+        branch_slots.dtype is not torch.int32
+        or branch_slots.ndim != 2
+        or branch_slots.shape[0] != slots.numel()
+        or not branch_slots.is_cuda
+        or not branch_slots.is_contiguous()
+    ):
+        raise ValueError(
+            "branch state slots must be contiguous CUDA int32 "
+            "[sequences, prefixes]"
+        )
 
 
 def gated_delta_packed(
@@ -429,6 +441,7 @@ def gated_delta_packed(
     chunk_sequences: torch.Tensor,
     recurrent_sequences: torch.Tensor,
     slots: torch.Tensor,
+    branch_slots: torch.Tensor,
     state_slab: torch.Tensor,
 ) -> torch.Tensor:
     """Execute a model-supplied recurrent/chunk partition of a packed batch."""
@@ -443,6 +456,7 @@ def gated_delta_packed(
     chunk_sequences = chunk_sequences.contiguous()
     recurrent_sequences = recurrent_sequences.contiguous()
     slots = slots.contiguous()
+    branch_slots = branch_slots.contiguous()
     _validate_delta_tensors(
         q,
         k,
@@ -459,6 +473,7 @@ def gated_delta_packed(
         chunk_sequences,
         recurrent_sequences,
         slots,
+        branch_slots,
     )
 
     output = torch.empty_like(value)
@@ -471,6 +486,7 @@ def gated_delta_packed(
         cu_seqlens,
         recurrent_sequences,
         slots,
+        branch_slots,
         state_slab,
         output,
     )

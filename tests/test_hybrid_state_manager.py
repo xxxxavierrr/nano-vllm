@@ -1,3 +1,4 @@
+import pytest
 import torch
 from torch import nn
 
@@ -21,80 +22,85 @@ class FakeHybridModel(nn.Module):
         return (
             torch.zeros(2, capacity, 3, 4, device=device, dtype=dtype),
             torch.zeros(
-                2,
-                capacity,
-                1,
-                2,
-                3,
-                device=device,
-                dtype=torch.float32,
+                2, capacity, 1, 2, 3, device=device, dtype=torch.float32
             ),
         )
 
 
 def test_transient_batch_view_uses_production_slab_layout():
     manager = HybridStateManager(FakeHybridModel(), torch.float32)
-
     conv, recurrent, slots = manager.batch_view((10, 11))
-
     assert conv.shape == (2, 2, 3, 4)
     assert recurrent.shape == (2, 2, 1, 2, 3)
     assert slots.tolist() == [0, 1]
-    assert manager.max_active == 2
     manager.release((10, 11))
     assert manager.transient == {}
 
 
-def test_persistent_slots_reset_reuse_and_enforce_capacity():
+def test_persistent_slots_reset_reuse_and_enforce_request_capacity():
     manager = HybridStateManager(FakeHybridModel(), torch.float32)
-    manager.allocate(2, device="cpu", with_working_copy=False)
-
+    manager.allocate(2, device="cpu")
     first = manager.get(10)
     first[0].fill_(7)
     assert manager.slots[10] == 0
     manager.get(11)
-    try:
+    with pytest.raises(RuntimeError, match="request capacity exhausted"):
         manager.get(12)
-    except RuntimeError as exc:
-        assert "capacity exhausted" in str(exc)
-    else:
-        raise AssertionError("capacity exhaustion was not reported")
-
     manager.release((10,))
     reused = manager.get(12)
     assert manager.slots[12] == 0
     assert torch.count_nonzero(reused[0]) == 0
 
 
-def test_speculative_transaction_copies_and_commits_selected_slots():
+@pytest.mark.parametrize("accepted_inputs", [1, 2, 3])
+def test_speculative_transaction_commits_selected_prefix_slot(accepted_inputs):
     manager = HybridStateManager(FakeHybridModel(), torch.float32)
-    manager.allocate(2, device="cpu", with_working_copy=True)
-    state_10 = manager.get(10)
-    state_11 = manager.get(11)
-    state_10[0].fill_(1)
-    state_11[0].fill_(2)
+    manager.allocate(1, device="cpu", branch_slots_per_sequence=3)
+    base = manager.get(10)
+    base[0].fill_(5)
+    old_slot = manager.slots[10]
 
-    transaction = manager.transaction((10, 11), enabled=True)
+    transaction = manager.transaction({10: 3}, enabled=True)
     transaction.begin()
-    working_10 = manager.get(10, working=True)
-    working_11 = manager.get(11, working=True)
-    torch.testing.assert_close(working_10[0], state_10[0])
-    torch.testing.assert_close(working_11[0], state_11[0])
+    candidates = manager.branches[10]
+    for prefix, slot in enumerate(candidates, start=1):
+        manager.committed[0][:, slot].fill_(prefix)
+        manager.committed[1][:, slot].fill_(prefix)
 
-    working_10[0].fill_(9)
-    working_11[0].fill_(8)
-    transaction.commit((10,))
+    transaction.commit({10: accepted_inputs})
 
-    assert torch.all(manager.get(10)[0] == 9)
-    assert torch.all(manager.get(11)[0] == 2)
+    assert manager.slots[10] == candidates[accepted_inputs - 1]
+    assert torch.all(manager.get(10)[0] == accepted_inputs)
+    assert old_slot in manager.free_slots
+    assert len(manager.free_slots) == 3
+    assert manager.branches == {}
+
+
+def test_branch_capacity_failure_does_not_leak_slots():
+    manager = HybridStateManager(FakeHybridModel(), torch.float32)
+    manager.allocate(1, device="cpu", branch_slots_per_sequence=2)
+    manager.get(10)
+    free_before = tuple(manager.free_slots)
+    with pytest.raises(RuntimeError, match="planned capacity"):
+        manager.reserve_branches({10: 3})
+    assert tuple(manager.free_slots) == free_before
+    assert manager.branches == {}
+
+
+def test_release_discards_uncommitted_branches():
+    manager = HybridStateManager(FakeHybridModel(), torch.float32)
+    manager.allocate(1, device="cpu", branch_slots_per_sequence=2)
+    manager.reserve_branches({10: 2})
+    manager.release((10,))
+    assert manager.slots == {}
+    assert manager.branches == {}
+    assert len(manager.free_slots) == manager.total_slot_capacity
 
 
 def test_dummy_slots_do_not_allocate_request_ownership():
     manager = HybridStateManager(FakeHybridModel(), torch.float32)
-    manager.allocate(3, device="cpu", with_working_copy=False)
+    manager.allocate(3, device="cpu")
     manager.get(10)
-
     dummy = manager.dummy_slots(2)
-
     assert dummy == [2, 1]
     assert manager.slots == {10: 0}

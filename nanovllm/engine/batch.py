@@ -61,6 +61,7 @@ class GDNMetadata:
     conv_slab: torch.Tensor
     recurrent_slab: torch.Tensor
     state_slots: torch.Tensor
+    branch_state_slots: torch.Tensor
     chunk_indices: torch.Tensor
     cu_chunks: torch.Tensor
     chunk_sequences: torch.Tensor

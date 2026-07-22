@@ -9,6 +9,7 @@ from nanovllm.layers.deltanet_chunk import gated_delta_packed
 def _run_recurrent(q, k, value, beta, decay, state):
     device = q.device
     empty = torch.empty(0, device=device, dtype=torch.int32)
+    branch_slots = torch.full((1, 1), -1, device=device, dtype=torch.int32)
     return gated_delta_packed(
         q,
         k,
@@ -21,6 +22,7 @@ def _run_recurrent(q, k, value, beta, decay, state):
         empty,
         torch.zeros(1, device=device, dtype=torch.int32),
         torch.zeros(1, device=device, dtype=torch.int32),
+        branch_slots,
         state.unsqueeze(0),
     )
 
@@ -79,6 +81,48 @@ def test_gated_delta_packed_recurrent_continuation_matches_full_sequence():
     torch.testing.assert_close(split_state, full_state, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_recurrent_speculative_prefixes_write_distinct_state_slots():
+    q, k, value, beta, decay, initial_state = _make_inputs(3)
+    expected_states = []
+    reference_state = initial_state.clone()
+    for token in range(3):
+        _reference(
+            q[token : token + 1],
+            k[token : token + 1],
+            value[token : token + 1],
+            beta[token : token + 1],
+            decay[token : token + 1],
+            reference_state,
+        )
+        expected_states.append(reference_state.clone())
+
+    state_slab = torch.zeros(
+        4, *initial_state.shape, device="cuda", dtype=torch.float32
+    )
+    state_slab[0].copy_(initial_state)
+    empty = torch.empty(0, device="cuda", dtype=torch.int32)
+    gated_delta_packed(
+        q,
+        k,
+        value,
+        beta,
+        decay,
+        torch.tensor((0, 3), device="cuda", dtype=torch.int32),
+        empty.reshape(0, 2),
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        empty,
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        torch.tensor([[1, 2, 3]], device="cuda", dtype=torch.int32),
+        state_slab,
+    )
+
+    torch.testing.assert_close(state_slab[0], initial_state, rtol=0, atol=0)
+    for slot, expected in enumerate(expected_states, start=1):
+        torch.testing.assert_close(state_slab[slot], expected, rtol=1e-4, atol=1e-4)
+
+
 def _causal_conv_reference(inputs, weight, cu_seqlens, slots, state):
     outputs = []
     kernel_size = weight.shape[-1]
@@ -126,10 +170,44 @@ def test_packed_causal_conv_mixed_lengths_matches_reference():
         weight,
         cu_seqlens,
         slots,
+        torch.full(
+            (len(lengths), 1), -1, device="cuda", dtype=torch.int32
+        ),
         actual_state,
         max(lengths),
     )
 
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_causal_conv_speculative_prefixes_write_distinct_state_slots():
+    torch.manual_seed(91)
+    tokens, channels, kernel_size = 3, 32, 4
+    inputs = torch.randn(tokens, channels, device="cuda")
+    weight = torch.randn(
+        channels, 1, kernel_size, device="cuda"
+    ).contiguous()
+    state = torch.randn(
+        4, channels, kernel_size, device="cuda"
+    )
+    base = state[0].clone()
+
+    packed_causal_conv1d(
+        inputs,
+        weight,
+        torch.tensor((0, tokens), device="cuda", dtype=torch.int32),
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        torch.tensor([[1, 2, 3]], device="cuda", dtype=torch.int32),
+        state,
+        tokens,
+    )
+
+    torch.testing.assert_close(state[0], base, rtol=0, atol=0)
+    for prefix, slot in enumerate((1, 2, 3), start=1):
+        expected = torch.cat(
+            (base, inputs[:prefix].transpose(0, 1)), dim=-1
+        )[:, -kernel_size:]
+        torch.testing.assert_close(state[slot], expected, rtol=0, atol=0)
 

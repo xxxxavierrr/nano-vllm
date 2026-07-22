@@ -427,7 +427,12 @@ class ModelRunner:
         minimum_delta_kv_blocks = 0
         if self.has_delta_state:
             state_bytes = self.model.delta_state_bytes(hf_config.dtype)
-            state_copies = 2 if self.mtp_model is not None else 1
+            branch_slots_per_sequence = (
+                1 + config.num_speculative_tokens
+                if self.mtp_model is not None
+                else 0
+            )
+            state_copies = 1 + branch_slots_per_sequence
             capacity_plan = plan_delta_state_capacity(
                 available_bytes=available_bytes,
                 state_bytes=state_bytes,
@@ -461,7 +466,7 @@ class ModelRunner:
             self.hybrid_state.allocate(
                 capacity_plan.capacity,
                 device="cuda",
-                with_working_copy=self.mtp_model is not None,
+                branch_slots_per_sequence=branch_slots_per_sequence,
             )
         cache_bytes = available_bytes - reserved_delta_bytes
         config.num_kvcache_blocks = cache_bytes // block_bytes
@@ -532,7 +537,11 @@ class ModelRunner:
                 f"scale_bytes_per_block={scale_bytes}, "
                 f"mtp_bytes_per_block={mtp_payload_bytes}, "
                 f"blocks={config.num_kvcache_blocks}, "
-                f"delta_state_slots={self.delta_state_capacity or 0}, "
+                f"delta_request_capacity={self.delta_state_capacity or 0}, "
+                f"delta_total_state_slots="
+                f"{self.hybrid_state.total_slot_capacity or 0}, "
+                f"delta_branch_slots_per_request="
+                f"{self.hybrid_state.branch_slots_per_sequence}, "
                 f"delta_state_bytes_per_sequence="
                 f"{delta_state_bytes_per_sequence}, "
                 f"guaranteed_kv_blocks_per_sequence="
@@ -588,8 +597,6 @@ class ModelRunner:
         self,
         seqs: list[Sequence],
         descriptor: BatchDescriptor,
-        *,
-        use_working_delta: bool = False,
     ) -> PreparedBatch:
         input_ids = []
         positions = []
@@ -708,6 +715,7 @@ class ModelRunner:
         delta_conv_slab = None
         delta_recurrent_slab = None
         delta_state_slots = None
+        delta_branch_state_slots = None
         delta_chunk_indices = None
         delta_cu_chunks = None
         delta_chunk_sequences = None
@@ -715,11 +723,17 @@ class ModelRunner:
         if self.has_delta_state:
             state_view = self.hybrid_state.batch_view(
                 (seq.seq_id for seq in seqs),
-                working=use_working_delta,
             )
             if state_view is None:
                 raise RuntimeError("hybrid state manager returned no state view")
             delta_conv_slab, delta_recurrent_slab, delta_state_slots = state_view
+            branch_width = (
+                max_seqlen_q if self.hybrid_state.branches else 1
+            )
+            delta_branch_state_slots = self.hybrid_state.branch_slots_view(
+                (seq.seq_id for seq in seqs),
+                branch_width,
+            )
             delta_chunk_indices = torch.tensor(
                 delta_chunk_indices_host,
                 dtype=torch.int32,
@@ -787,6 +801,7 @@ class ModelRunner:
                     delta_cu_chunks,
                     delta_chunk_sequences,
                     delta_recurrent_sequences,
+                    delta_branch_state_slots,
                 )
             ):
                 raise RuntimeError("runner produced incomplete GDN metadata")
@@ -795,6 +810,7 @@ class ModelRunner:
                 conv_slab=delta_conv_slab,
                 recurrent_slab=delta_recurrent_slab,
                 state_slots=delta_state_slots,
+                branch_state_slots=delta_branch_state_slots,
                 chunk_indices=delta_chunk_indices,
                 cu_chunks=delta_cu_chunks,
                 chunk_sequences=delta_chunk_sequences,
@@ -813,45 +829,6 @@ class ModelRunner:
         temperatures = [seq.temperature for seq in seqs]
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
-
-    @torch.inference_mode()
-    def _replay_rejected_prefixes(
-        self,
-        rejected: list[tuple[Sequence, int]],
-    ):
-        if not rejected:
-            return
-        saved = [
-            (seq, seq.num_scheduled_tokens)
-            for seq, _ in rejected
-        ]
-        replay_lengths = [1 + accepted for _, accepted in rejected]
-        try:
-            for (seq, accepted), replay_length in zip(
-                rejected, replay_lengths
-            ):
-                if not 0 <= accepted < len(seq.draft_token_ids):
-                    raise ValueError("invalid partial draft acceptance for replay")
-                seq.num_scheduled_tokens = replay_length
-            uniform_query_len = (
-                replay_lengths[0]
-                if all(length == replay_lengths[0] for length in replay_lengths)
-                else None
-            )
-            descriptor = BatchDescriptor(
-                num_tokens=sum(replay_lengths),
-                num_padded_tokens=sum(replay_lengths),
-                num_seqs=len(rejected),
-                uniform_query_len=uniform_query_len,
-                execution_mode=ExecutionMode.EAGER,
-            )
-            seqs = [seq for seq, _ in rejected]
-            prepared = self.prepare_inputs(seqs, descriptor)
-            with forward_context(prepared):
-                self.run_model(prepared, descriptor)
-        finally:
-            for seq, scheduled in saved:
-                seq.num_scheduled_tokens = scheduled
 
     @torch.inference_mode()
     def run_model(
@@ -897,6 +874,11 @@ class ModelRunner:
                 graph_vars["delta_state_slots"][:num_requests] = (
                     prepared.gdn.state_slots
                 )
+                graph_vars["delta_branch_state_slots"].fill_(-1)
+                graph_vars["delta_branch_state_slots"][
+                    :num_requests,
+                    : prepared.gdn.branch_state_slots.size(1),
+                ] = prepared.gdn.branch_state_slots
                 num_dummy_slots = padded_requests - num_requests
                 if num_dummy_slots:
                     dummy_slots = self.hybrid_state.dummy_slots(num_dummy_slots)
@@ -973,7 +955,11 @@ class ModelRunner:
                 ),
             )
         state_transaction = self.hybrid_state.transaction(
-            (seq.seq_id for seq in seqs),
+            {
+                seq.seq_id: seq.num_scheduled_tokens
+                for seq in sampled_seqs
+                if seq.is_speculative
+            },
             enabled=has_verification,
         )
         state_transaction.begin()
@@ -981,7 +967,6 @@ class ModelRunner:
         prepared = self.prepare_inputs(
             seqs,
             descriptor,
-            use_working_delta=has_verification,
         )
         with forward_context(prepared):
             hidden_states = self.run_model(prepared, descriptor)
@@ -1006,10 +991,6 @@ class ModelRunner:
 
             token_groups: list[list[int]] = []
             accepted_counts: list[int] = []
-            rejected_seqs: list[tuple[Sequence, int]] = []
-            committed_working_seqs: list[Sequence] = [
-                seq for seq in seqs if not seq.will_sample
-            ]
             logit_offset = 0
             for seq in sampled_seqs:
                 if seq.is_speculative:
@@ -1033,26 +1014,25 @@ class ModelRunner:
                     )
                     token_groups.append(outputs)
                     accepted_counts.append(accepted)
-                    if accepted == num_drafts:
-                        committed_working_seqs.append(seq)
-                    else:
-                        rejected_seqs.append((seq, accepted))
                 else:
                     token_groups.append(
                         [int(logits[logit_offset].argmax().item())]
                     )
                     accepted_counts.append(0)
                     logit_offset += 1
-                    if has_verification:
-                        committed_working_seqs.append(seq)
             if logit_offset != logits.size(0):
                 raise ValueError("target verification logits were not fully consumed")
 
             if has_verification:
                 state_transaction.commit(
-                    seq.seq_id for seq in committed_working_seqs
+                    {
+                        seq.seq_id: 1 + accepted
+                        for seq, accepted in zip(
+                            sampled_seqs, accepted_counts
+                        )
+                        if seq.is_speculative
+                    }
                 )
-                self._replay_rejected_prefixes(rejected_seqs)
 
             proposals = self.speculator.propose(
                 seqs,
@@ -1179,6 +1159,12 @@ class ModelRunner:
         delta_state_slots = torch.arange(
             max_requests, dtype=torch.int32, device="cuda"
         )
+        delta_branch_state_slots = torch.full(
+            (max_requests, max_query_len),
+            -1,
+            dtype=torch.int32,
+            device="cuda",
+        )
         empty_delta_pairs = torch.empty(
             0, 2, dtype=torch.int32, device="cuda"
         )
@@ -1223,6 +1209,20 @@ class ModelRunner:
                     query_len, dtype=torch.int32, device="cuda"
                 ).repeat(num_requests)
                 context_lens[:num_requests].fill_(query_len)
+                delta_branch_state_slots.fill_(-1)
+                if self.has_delta_state and query_len > 1:
+                    for sequence in range(num_requests):
+                        branch_begin = (
+                            max_requests + sequence * max_query_len
+                        )
+                        delta_branch_state_slots[
+                            sequence, :query_len
+                        ] = torch.arange(
+                            branch_begin,
+                            branch_begin + query_len,
+                            dtype=torch.int32,
+                            device="cuda",
+                        )
 
                 tile_sequence_ids = []
                 tile_starts = []
@@ -1261,6 +1261,9 @@ class ModelRunner:
                         conv_slab=self.delta_state_slab[0],
                         recurrent_slab=self.delta_state_slab[1],
                         state_slots=delta_state_slots[:num_requests],
+                        branch_state_slots=delta_branch_state_slots[
+                            :num_requests, :query_len
+                        ],
                         chunk_indices=empty_delta_pairs,
                         cu_chunks=delta_cu_chunks,
                         chunk_sequences=empty_delta_sequences,
@@ -1322,5 +1325,6 @@ class ModelRunner:
             query_tile_lens=query_tile_lens,
             query_tile_positions=query_tile_positions,
             delta_state_slots=delta_state_slots,
+            delta_branch_state_slots=delta_branch_state_slots,
             outputs=outputs,
         )

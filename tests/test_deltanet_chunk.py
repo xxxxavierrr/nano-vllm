@@ -25,6 +25,7 @@ def _run_partition(q, k, value, beta, decay, state, *, chunked):
         cu_chunks = torch.zeros(1, device=device, dtype=torch.int32)
         chunk_sequences = empty
         recurrent_sequences = torch.zeros(1, device=device, dtype=torch.int32)
+    branch_slots = torch.full((1, 1), -1, device=device, dtype=torch.int32)
     return gated_delta_packed(
         q,
         k,
@@ -37,6 +38,7 @@ def _run_partition(q, k, value, beta, decay, state, *, chunked):
         chunk_sequences,
         recurrent_sequences,
         torch.zeros(1, device=device, dtype=torch.int32),
+        branch_slots,
         state.unsqueeze(0),
     )
 
@@ -148,6 +150,7 @@ def test_gated_delta_packed_mixed_partition_matches_recurrent_partition():
         empty,
         torch.arange(len(lengths), device="cuda", dtype=torch.int32),
         slots,
+        torch.full((len(lengths), 1), -1, device="cuda", dtype=torch.int32),
         expected_state,
     )
     actual_state = state.clone()
@@ -163,6 +166,7 @@ def test_gated_delta_packed_mixed_partition_matches_recurrent_partition():
         chunk_sequences,
         recurrent_sequences,
         slots,
+        torch.full((len(lengths), 1), -1, device="cuda", dtype=torch.int32),
         actual_state,
     )
 
