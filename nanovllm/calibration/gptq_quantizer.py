@@ -89,12 +89,11 @@ def _pack_int4(values: torch.Tensor, dim: int, pad_value: int = 0) -> torch.Tens
     return torch.sum(lanes << shifts, dim=dim + 1).to(torch.int32)
 
 
-@torch.inference_mode()
-def quantize_linear_gptq(
+def _prepare_quantization(
     weight: torch.Tensor,
     hessian: torch.Tensor,
-    config: GPTQQuantizerConfig = GPTQQuantizerConfig(),
-) -> dict[str, torch.Tensor]:
+    config: GPTQQuantizerConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
     config.validate()
     if weight.ndim != 2 or not weight.is_floating_point():
         raise TypeError("GPTQ weight must be floating [out_features, in_features]")
@@ -105,53 +104,88 @@ def quantize_linear_gptq(
         raise TypeError("GPTQ Hessian must be FP32 [in_features, in_features]")
 
     working = weight.detach().float().cpu().clone()
-    hessian = hessian.detach().float().cpu().clone()
-    dead = torch.diag(hessian) <= 0
+    conditioned = hessian.detach().float().cpu().clone()
+    dead = torch.diag(conditioned) <= 0
     if bool(dead.any()):
-        hessian[dead, dead] = 1
+        conditioned[dead, dead] = 1
         working[:, dead] = 0
     try:
-        inverse = torch.linalg.cholesky(hessian)
+        inverse = torch.linalg.cholesky(conditioned)
         inverse = torch.cholesky_inverse(inverse)
-        inverse = torch.linalg.cholesky(inverse, upper=True)
+        return working, torch.linalg.cholesky(inverse, upper=True)
     except RuntimeError as exc:
         raise ValueError("damped GPTQ Hessian is not positive definite") from exc
 
+
+def _group_scales(
+    working: torch.Tensor,
+    config: GPTQQuantizerConfig,
+) -> torch.Tensor:
+    out_features, in_features = working.shape
     groups = in_features // config.group_size
     scales = torch.empty((groups, out_features), dtype=torch.float32)
-    quantized_kn = torch.empty((in_features, out_features), dtype=torch.int32)
     for group in range(groups):
         begin = group * config.group_size
         end = begin + config.group_size
-        # Zero point eight represents signed values [-8, 7]. Using /7 avoids
-        # clipping the positive maximum; -8 remains available for asymmetry.
-        scales[group] = working[:, begin:end].abs().amax(dim=1).clamp_min(1.0e-12) / 7
+        # Stored zero eight represents signed values [-8, 7]. Dividing by
+        # seven preserves the positive maximum while retaining -8.
+        scales[group] = (
+            working[:, begin:end].abs().amax(dim=1).clamp_min(1.0e-12) / 7
+        )
+    return scales
 
+
+def _quantize_columns(
+    working: torch.Tensor,
+    inverse: torch.Tensor,
+    scales: torch.Tensor,
+    config: GPTQQuantizerConfig,
+) -> torch.Tensor:
+    out_features, in_features = working.shape
+    quantized = torch.empty((in_features, out_features), dtype=torch.int32)
     for block_start in range(0, in_features, config.block_size):
         block_end = min(block_start + config.block_size, in_features)
         errors = torch.zeros((out_features, block_end - block_start))
         for column in range(block_start, block_end):
-            group = column // config.group_size
-            scale = scales[group]
+            scale = scales[column // config.group_size]
             values = torch.round(working[:, column] / scale).add(8).clamp(0, 15)
-            quantized_kn[column] = values.to(torch.int32)
-            dequantized = (values - 8) * scale
+            quantized[column] = values.to(torch.int32)
             diagonal = inverse[column, column].clamp_min(torch.finfo(torch.float32).eps)
-            error = (working[:, column] - dequantized) / diagonal
+            error = (working[:, column] - (values - 8) * scale) / diagonal
             errors[:, column - block_start] = error
             working[:, column:block_end] -= error.unsqueeze(1) * inverse[column, column:block_end]
         if block_end < in_features:
             working[:, block_end:] -= errors @ inverse[block_start:block_end, block_end:]
+    return quantized
 
+
+def _pack_quantized(
+    quantized: torch.Tensor,
+    scales: torch.Tensor,
+    config: GPTQQuantizerConfig,
+) -> dict[str, torch.Tensor]:
+    in_features, out_features = quantized.shape
     stored_zero = 7
-    qzeros_logical = torch.full(
-        (groups, out_features), stored_zero, dtype=torch.int32
+    logical_zeros = torch.full(
+        (scales.shape[0], out_features), stored_zero, dtype=torch.int32
     )
     return {
-        "qweight": _pack_int4(quantized_kn, dim=0),
+        "qweight": _pack_int4(quantized, dim=0),
         "scales": scales.to(torch.float16).contiguous(),
-        "qzeros": _pack_int4(qzeros_logical, dim=1, pad_value=stored_zero),
+        "qzeros": _pack_int4(logical_zeros, dim=1, pad_value=stored_zero),
         "g_idx": torch.arange(in_features, dtype=torch.int32).div(
             config.group_size, rounding_mode="floor"
         ),
     }
+
+
+@torch.inference_mode()
+def quantize_linear_gptq(
+    weight: torch.Tensor,
+    hessian: torch.Tensor,
+    config: GPTQQuantizerConfig = GPTQQuantizerConfig(),
+) -> dict[str, torch.Tensor]:
+    working, inverse = _prepare_quantization(weight, hessian, config)
+    scales = _group_scales(working, config)
+    quantized = _quantize_columns(working, inverse, scales, config)
+    return _pack_quantized(quantized, scales, config)

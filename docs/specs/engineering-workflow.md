@@ -3,7 +3,7 @@ subject: engineering-workflow
 title: Repository documentation and task harness
 status: active
 created: 2026-07-22
-updated: 2026-07-22
+updated: 2026-07-23
 owner: Codex
 ---
 
@@ -25,6 +25,14 @@ command history, evidence, task state, and reusable knowledge outside chat.
 - `.workflow/README.md` is the single schema and lifecycle authority.
 - Archiving updates overall docs and promotes durable knowledge.
 - `AGENTS.md` makes the workflow discoverable.
+- Implementation tasks declare component ownership and forbidden
+  responsibilities before editing production code.
+- A checked-in structure gate rejects new oversized orchestration functions
+  and prevents existing large methods from silently growing.
+- Numerical kernels may use documented exceptions; Python orchestration does
+  not inherit those exceptions.
+- Checked-in scripts under `docs/hooks/` provide the mandatory pre-change
+  baseline and pre-commit validation commands on both local and GPU hosts.
 
 ## Scope
 
@@ -40,6 +48,8 @@ Repository engineering documentation and agent operating procedure.
 - Required directories, indexes, records, and workflow rules exist.
 - Multiple tasks can link to one subject spec without duplicating it.
 - Active and completed tasks contain complete execution evidence.
+- Structural evidence shows that touched orchestration methods satisfy the
+  repository policy or have a narrowly documented, time-bounded exception.
 
 ## Constraints and open questions
 
@@ -57,4 +67,5 @@ real implementation rather than becoming a parallel bureaucracy.
 - 2026-07-22: Removed templates; workflow became the single authority.
 - 2026-07-22: Separated long-lived subject specs from independently identified
   execution tasks.
-
+- 2026-07-23: Added an executable architecture/maintainability gate after a
+  functional optimization task expanded existing orchestration methods.

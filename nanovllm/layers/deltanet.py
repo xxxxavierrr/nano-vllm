@@ -226,7 +226,7 @@ def _packed_causal_conv_branch_state_kernel(
     )
 
 
-def packed_causal_conv1d(
+def _validate_conv_inputs(
     inputs: torch.Tensor,
     weight: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -234,8 +234,7 @@ def packed_causal_conv1d(
     branch_slots: torch.Tensor,
     state_slab: torch.Tensor,
     max_seqlen: int,
-) -> torch.Tensor:
-    """Run packed depthwise causal convolution and update request states."""
+) -> tuple[int, int, int]:
     if inputs.ndim != 2:
         raise ValueError("packed causal convolution input must have shape [T, D]")
     tokens, channels = inputs.shape
@@ -277,60 +276,83 @@ def packed_causal_conv1d(
         tensor.is_contiguous() for tensor in (inputs, weight, state_slab)
     ):
         raise ValueError("packed causal convolution tensors must be contiguous")
+    return channels, kernel_size, num_sequences
+
+
+def _launch_conv_output(
+    inputs,
+    weight,
+    cu_seqlens,
+    slots,
+    state_slab,
+    output,
+    *,
+    channels: int,
+    kernel_size: int,
+    num_sequences: int,
+    max_seqlen: int,
+    block_d: int,
+) -> None:
+    grid = (max_seqlen, num_sequences, triton.cdiv(channels, block_d))
+    _packed_causal_conv_kernel[grid](
+        inputs, weight, cu_seqlens, slots, state_slab, output,
+        D=channels, KERNEL=kernel_size, BLOCK_D=block_d,
+        num_warps=4, num_stages=2,
+    )
+
+
+def _launch_conv_states(
+    inputs,
+    cu_seqlens,
+    slots,
+    branch_slots,
+    state_slab,
+    *,
+    channels: int,
+    kernel_size: int,
+    num_sequences: int,
+    block_d: int,
+) -> None:
+    block_k = triton.next_power_of_2(kernel_size)
+    common = dict(
+        D=channels, KERNEL=kernel_size, BLOCK_D=block_d, BLOCK_K=block_k,
+        BRANCH_STRIDE=branch_slots.stride(0), num_warps=4, num_stages=2,
+    )
+    state_grid = (num_sequences, triton.cdiv(channels, block_d))
+    _packed_causal_conv_state_kernel[state_grid](
+        inputs, cu_seqlens, slots, branch_slots, state_slab, **common
+    )
+    branch_grid = (*state_grid, branch_slots.shape[1])
+    _packed_causal_conv_branch_state_kernel[branch_grid](
+        inputs, cu_seqlens, slots, branch_slots, state_slab, **common
+    )
+
+
+def packed_causal_conv1d(
+    inputs: torch.Tensor,
+    weight: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    slots: torch.Tensor,
+    branch_slots: torch.Tensor,
+    state_slab: torch.Tensor,
+    max_seqlen: int,
+) -> torch.Tensor:
+    """Run packed depthwise causal convolution and update request states."""
+    channels, kernel_size, num_sequences = _validate_conv_inputs(
+        inputs, weight, cu_seqlens, slots, branch_slots, state_slab, max_seqlen
+    )
 
     output = torch.empty_like(inputs)
     block_d = min(128, triton.next_power_of_2(channels))
-    _packed_causal_conv_kernel[
-        (max_seqlen, num_sequences, triton.cdiv(channels, block_d))
-    ](
-        inputs,
-        weight,
-        cu_seqlens,
-        slots,
-        state_slab,
-        output,
-        D=channels,
-        KERNEL=kernel_size,
-        BLOCK_D=block_d,
-        num_warps=4,
-        num_stages=2,
+    _launch_conv_output(
+        inputs, weight, cu_seqlens, slots, state_slab, output,
+        channels=channels, kernel_size=kernel_size,
+        num_sequences=num_sequences, max_seqlen=max_seqlen, block_d=block_d,
     )
-    block_k = triton.next_power_of_2(kernel_size)
-    _packed_causal_conv_state_kernel[
-        (num_sequences, triton.cdiv(channels, block_d))
-    ](
-        inputs,
-        cu_seqlens,
-        slots,
-        branch_slots,
-        state_slab,
-        D=channels,
-        KERNEL=kernel_size,
-        BLOCK_D=block_d,
-        BLOCK_K=block_k,
-        BRANCH_STRIDE=branch_slots.stride(0),
-        num_warps=4,
-        num_stages=2,
-    )
-    _packed_causal_conv_branch_state_kernel[
-        (
-            num_sequences,
-            triton.cdiv(channels, block_d),
-            branch_slots.shape[1],
-        )
-    ](
-        inputs,
-        cu_seqlens,
-        slots,
-        branch_slots,
-        state_slab,
-        D=channels,
-        KERNEL=kernel_size,
-        BLOCK_D=block_d,
-        BLOCK_K=block_k,
-        BRANCH_STRIDE=branch_slots.stride(0),
-        num_warps=4,
-        num_stages=2,
+    _launch_conv_states(
+        inputs, cu_seqlens, slots, branch_slots, state_slab,
+        channels=channels, kernel_size=kernel_size,
+        num_sequences=num_sequences, block_d=block_d,
     )
     return output
 

@@ -94,6 +94,7 @@ def test_summary_reports_errors_goodput_and_token_throughput():
     assert metrics["requests"]["status_codes"] == {"429": 1}
     assert metrics["tokens"]["prefix_cache_hit_rate"] == 0.8
     assert metrics["slo"]["good_requests"] == 1
+    assert metrics["slo"]["attainment"] == 0.5
     assert metrics["slo"]["good_output_tokens"] == 3
     assert metrics["slo"]["goodput_output_token_per_s"] > 0
 

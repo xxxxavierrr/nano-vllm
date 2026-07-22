@@ -3,7 +3,7 @@ subject: inference-runtime-architecture
 title: Qwen3.6 inference runtime architecture
 status: active
 created: 2026-07-22
-updated: 2026-07-22
+updated: 2026-07-23
 owner: Codex
 ---
 
@@ -37,6 +37,12 @@ not from introducing an EngineCore/LocalExecutor process split prematurely.
   separate.
 - Add an abstraction only when it owns policy, resources, mutation, or an
   independently testable lifecycle.
+- `ModelRunner.run` is an orchestration facade, not the implementation owner of
+  speculative verification, acceptance, state commit, proposal bookkeeping,
+  or metrics aggregation. Those phases expose focused interfaces and tests.
+- Batch preparation delegates attention, GDN, sampling, and graph-buffer
+  construction to focused builders; no single preparation method reconstructs
+  every metadata family.
 
 ## Target runtime flow
 
@@ -400,3 +406,5 @@ engine.
   and fixed-k MTP verification, followed by Graph lifecycle extraction.
 - 2026-07-22: Authorized typed rank-local step results to replace mutable
   `last_execution_mode` and speculative-stat side channels.
+- 2026-07-23: Made runner orchestration and batch-builder delegation explicit
+  structural requirements after later optimizations expanded the facade.

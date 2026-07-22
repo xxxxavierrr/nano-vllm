@@ -40,10 +40,7 @@ def parse_metadata(items: list[str]) -> dict[str, str]:
     return metadata
 
 
-def parse_args(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(
-        description="Implementation-independent OpenAI Chat serving benchmark"
-    )
+def _add_request_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", required=True)
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY"))
@@ -68,6 +65,9 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--allow-errors", action="store_true")
     parser.add_argument("--no-stream-usage", action="store_true")
     parser.add_argument("--skip-protocol-check", action="store_true")
+
+
+def _add_sweep_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--sweep-start-rate", type=float, default=0.5)
     parser.add_argument("--sweep-growth-factor", type=float, default=2.0)
@@ -76,8 +76,9 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-error-rate", type=float, default=0.01)
     parser.add_argument("--gpu-telemetry", action="store_true")
     parser.add_argument("--gpu-telemetry-interval", type=float, default=0.5)
-    args = parser.parse_args(argv)
 
+
+def _apply_profile(parser: argparse.ArgumentParser, args) -> None:
     try:
         profile = load_profile(args.profile)
         args.metadata = parse_metadata(args.metadata)
@@ -100,6 +101,9 @@ def parse_args(argv: list[str] | None = None):
             args.request_rate = float(args.request_rate)
         except ValueError as exc:
             parser.error(f"invalid profile request_rate: {args.request_rate!r}")
+
+
+def _validate_args(parser: argparse.ArgumentParser, args) -> None:
     if args.num_requests <= 0 or args.max_concurrency <= 0:
         parser.error("num_requests and max_concurrency must be positive")
     if args.input_len <= 0 or args.output_len <= 0:
@@ -126,6 +130,17 @@ def parse_args(argv: list[str] | None = None):
             parser.error("--sweep-growth-factor must be greater than one")
         if args.sweep_refine_steps < 0:
             parser.error("--sweep-refine-steps cannot be negative")
+
+
+def parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(
+        description="Implementation-independent OpenAI Chat serving benchmark"
+    )
+    _add_request_options(parser)
+    _add_sweep_options(parser)
+    args = parser.parse_args(argv)
+    _apply_profile(parser, args)
+    _validate_args(parser, args)
     return args
 
 

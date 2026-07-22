@@ -11,6 +11,7 @@
 | [Runtime architecture](specs/inference-runtime-architecture.md) / [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-010 semantic Full Graph](tasks/active/TASK-20260722-010-semantic-full-graph/README.md) | active | Implement semantic q=1/q=1+k capture keys and replay |
 | [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-011 typed step metrics](tasks/active/TASK-20260722-011-typed-step-metrics/README.md) | active | Return metrics with rank-local model results |
 | [Quantization](specs/quantization.md) / [Speculative decoding](specs/speculative-decoding.md) / [Gated DeltaNet](specs/gated-deltanet.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260722-012 quant/spec/state optimization](tasks/active/TASK-20260722-012-spec-quant-state-optimization/README.md) | active | Implement benchmark instrumentation locally; RTX 4090D correctness and SLO-goodput validation pending |
+| [Engineering workflow](specs/engineering-workflow.md) / [Runtime architecture](specs/inference-runtime-architecture.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260723-013 structural harness and refactor](tasks/active/TASK-20260723-013-structural-harness-refactor/README.md) | active | Local structural and CPU/Mock gates pass; GPU runner/kernel equivalence remains pending |
 
 ## Completed
 

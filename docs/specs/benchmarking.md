@@ -3,7 +3,7 @@ subject: benchmarking
 title: Inference benchmark and goodput methodology
 status: active
 created: 2026-07-22
-updated: 2026-07-22
+updated: 2026-07-23
 owner: Codex
 ---
 
@@ -57,6 +57,11 @@ production optimizations by end-to-end goodput under a declared latency SLO.
   path, and unavailable metrics.
 - No GPU performance result is inferred from CPU tests, static inspection, or
   theoretical byte ratios. Missing hardware evidence is marked pending.
+- Request timing and SLO eligibility are derived once into immutable facts.
+  Request goodput, output-token goodput, latency distributions, and reporting
+  consume those same facts rather than reimplementing the SLO predicate.
+- Offline engine execution, aggregation, result assembly, and presentation are
+  separate boundaries; the CLI entry point does not own the benchmark loop.
 
 ## Scope
 
@@ -144,3 +149,5 @@ optimization comparison.
   required evidence for the optimization roadmap.
 - 2026-07-22: Fixed online SLO timing at planned arrival, defined separate
   service latency, and standardized schema v3 engine/GPU telemetry provenance.
+- 2026-07-23: Required single-source timing/SLO facts and separated offline
+  execution, aggregation, result construction, and presentation boundaries.

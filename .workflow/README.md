@@ -30,9 +30,14 @@ optimization must follow this lifecycle:
 4. **Plan**
    - Put verifiable steps and the test matrix in `plan.md`.
    - Mark exactly one step `[>]` while work is in progress.
+   - For implementation work, list the affected ownership boundaries and the
+     methods/modules that must become smaller or must not grow.
 5. **Implement within the spec**
    - Amend the spec/design before materially changing scope or behavior.
    - Preserve unrelated user changes and secrets.
+   - Orchestration code delegates policy, state mutation, numerical work, and
+     reporting to their declared owners. Passing tests do not justify adding a
+     new responsibility to an already broad method.
 6. **Record execution**
    - Log meaningful build, test, benchmark, migration, server, and Git commands
      in `commands.md`, with environment, outcome, and artifact paths.
@@ -42,6 +47,9 @@ optimization must follow this lifecycle:
    - Never call skipped or unavailable tests passed.
    - Separate static/CPU, GPU correctness, graph, online, accuracy, benchmark,
      and regression evidence.
+   - Run the repository structure check for touched Python orchestration code.
+     New or expanded review-trigger functions require decomposition or a
+     task-local exception with a concrete reason and owner.
 8. **Record decisions and knowledge**
    - Put task tradeoffs in `decisions.md`.
    - Promote only stable cross-task facts to `docs/knowledge/`.
@@ -76,6 +84,37 @@ log. It must not contain per-task progress, command logs, or test transcripts.
 A task README links the owning spec(s) and summarizes its goal, status, current
 gate, and record files. Supporting task files must contain real task data; do
 not create placeholder-only records.
+
+## Architecture and maintainability gate
+
+Before implementation, `design.md` must name for every affected component:
+
+- what it owns;
+- what it delegates;
+- mutable state and lifecycle it controls;
+- responsibilities explicitly forbidden from entering it.
+
+The checked-in hooks are mandatory:
+
+1. Before implementation, run
+   `python docs/hooks/check_structure.py --report-only` and record the baseline.
+2. After implementation and before every commit, run
+   `python docs/hooks/run_required_checks.py` and record the result.
+
+The structure checker is a review trigger, not a substitute for design review:
+
+- Python orchestration functions over 80 lines are rejected by default;
+- token-hot-path orchestration functions listed by the architecture spec use a
+  stricter 60-line budget;
+- numerical Triton/CUDA kernels, generated code, and compatibility shims may
+  be exempt only in the checked-in policy, with a reason;
+- an existing over-budget function is technical debt, not permission to grow;
+  a task touching its behavior must reduce it or record a blocking dependency.
+
+Function length is only the mechanical floor. A shorter function still fails
+review when it owns unrelated policy, state, numerical, serialization, and
+reporting responsibilities. Structural acceptance evidence belongs in
+`tests.md`; exceptions and their removal condition belong in `decisions.md`.
 
 ## Resume protocol
 

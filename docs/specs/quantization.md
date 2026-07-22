@@ -3,7 +3,7 @@ subject: quantization
 title: Model and KV-cache quantization
 status: active
 created: 2026-07-22
-updated: 2026-07-22
+updated: 2026-07-23
 owner: Codex
 ---
 
@@ -57,6 +57,12 @@ graph compatibility, accuracy, observability, and benchmark comparison.
   modes without hidden host synchronization or first-request compilation.
 - Accuracy and performance are measured against the same model/workload in a
   memory-safe sequential comparison.
+- Calibration separates Hessian conditioning, scale derivation, blockwise
+  error propagation, and packed serialization. The public quantizer expresses
+  their order without implementing every numerical phase inline.
+- FP8 DeltaNet layout/capacity arithmetic, CPU reference codecs, state-pool
+  lifecycle, and experimental runtime kernels remain separate modules with a
+  compatibility facade for existing imports.
 - Kernel selection is split by numerical shape/hardware regime, not by request
   label. W4A16 must cover optimized small-M and large-M paths; fused W4A8 is a
   later large-M optimization after W4A16, state branching, and rejection
@@ -222,3 +228,5 @@ target checkpoint shapes.
 - 2026-07-22: Added the opt-in SM89 native-extension contract, safe Triton
   default, explicit native layout validation, and experimental large-M W4A8
   source boundary; CUDA validation remains required before enablement.
+- 2026-07-23: Added calibration-phase and FP8 DeltaNet module ownership
+  boundaries; public orchestration may not absorb their internal algorithms.

@@ -250,7 +250,7 @@ def _fp8_paged_attention_kernel(
     tl.store(out_ptr + out_offsets, output, mask=active_rows[:, None])
 
 
-def fp8_paged_attention(
+def _validate_fp8_attention(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -262,9 +262,8 @@ def fp8_paged_attention(
     tile_starts: torch.Tensor,
     tile_lens: torch.Tensor,
     tile_positions: torch.Tensor,
-    softmax_scale: float,
     block_size: int,
-) -> torch.Tensor:
+) -> tuple[int, int, int, int]:
     num_tokens, num_query_heads, head_dim = query.shape
     num_kv_heads = k_cache.shape[-2]
     if query.dtype != torch.bfloat16:
@@ -294,6 +293,48 @@ def fp8_paged_attention(
         and v_scale.is_contiguous()
     ):
         raise ValueError("FP8 paged attention requires contiguous cache tensors")
+    return num_tokens, num_query_heads, num_kv_heads, head_dim
+
+
+def _launch_fp8_attention(
+    query, k_cache, v_cache, k_scale, v_scale, block_tables, context_lens,
+    tile_seq_ids, tile_starts, tile_lens, tile_positions, softmax_scale,
+    block_size, output, num_query_heads, num_kv_heads, head_dim,
+) -> None:
+    block_n = 32 if head_dim == 256 else 64
+    num_warps = 8 if head_dim == 256 else 4
+    grid = (tile_seq_ids.numel(), num_query_heads)
+    _fp8_paged_attention_kernel[grid](
+        query, k_cache, v_cache, k_scale, v_scale, block_tables, context_lens,
+        tile_seq_ids, tile_starts, tile_lens, tile_positions, output,
+        query.stride(0), query.stride(1), output.stride(0), output.stride(1),
+        block_tables.stride(0), num_kv_heads,
+        BLOCK_SIZE=block_size, HEAD_DIM=head_dim,
+        Q_PER_KV=num_query_heads // num_kv_heads, SOFTMAX_SCALE=softmax_scale,
+        BLOCK_M=FP8_QUERY_TILE_SIZE, BLOCK_N=block_n,
+        num_warps=num_warps, num_stages=2,
+    )
+
+
+def fp8_paged_attention(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    tile_seq_ids: torch.Tensor,
+    tile_starts: torch.Tensor,
+    tile_lens: torch.Tensor,
+    tile_positions: torch.Tensor,
+    softmax_scale: float,
+    block_size: int,
+) -> torch.Tensor:
+    num_tokens, num_query_heads, num_kv_heads, head_dim = _validate_fp8_attention(
+        query, k_cache, v_cache, k_scale, v_scale, block_tables, context_lens,
+        tile_seq_ids, tile_starts, tile_lens, tile_positions, block_size,
+    )
 
     num_tiles = tile_seq_ids.numel()
     if num_tiles == 0:
@@ -312,35 +353,10 @@ def fp8_paged_attention(
         )
 
     output = torch.empty_like(query)
-    block_n = 32 if head_dim == 256 else 64
-    num_warps = 8 if head_dim == 256 else 4
-    _fp8_paged_attention_kernel[(num_tiles, num_query_heads)](
-        query,
-        k_cache,
-        v_cache,
-        k_scale,
-        v_scale,
-        block_tables,
-        context_lens,
-        tile_seq_ids,
-        tile_starts,
-        tile_lens,
-        tile_positions,
-        output,
-        query.stride(0),
-        query.stride(1),
-        output.stride(0),
-        output.stride(1),
-        block_tables.stride(0),
-        num_kv_heads,
-        BLOCK_SIZE=block_size,
-        HEAD_DIM=head_dim,
-        Q_PER_KV=num_query_heads // num_kv_heads,
-        SOFTMAX_SCALE=softmax_scale,
-        BLOCK_M=FP8_QUERY_TILE_SIZE,
-        BLOCK_N=block_n,
-        num_warps=num_warps,
-        num_stages=2,
+    _launch_fp8_attention(
+        query, k_cache, v_cache, k_scale, v_scale, block_tables, context_lens,
+        tile_seq_ids, tile_starts, tile_lens, tile_positions, softmax_scale,
+        block_size, output, num_query_heads, num_kv_heads, head_dim,
     )
     return output
 

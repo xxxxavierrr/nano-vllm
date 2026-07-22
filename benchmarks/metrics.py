@@ -1,8 +1,32 @@
 import math
 from collections import Counter
+from dataclasses import dataclass
 from statistics import fmean
 
 from benchmarks.models import EngineSnapshot, RequestResult
+
+
+@dataclass(frozen=True, slots=True)
+class SLOThresholds:
+    ttft_ms: float | None
+    tpot_ms: float | None
+    e2e_ms: float | None
+
+    @property
+    def enabled(self) -> bool:
+        return any(value is not None for value in (self.ttft_ms, self.tpot_ms, self.e2e_ms))
+
+
+@dataclass(frozen=True, slots=True)
+class RequestTiming:
+    result: RequestResult
+    ttft_s: float | None
+    service_ttft_s: float | None
+    tpot_s: float | None
+    e2e_s: float
+    service_e2e_s: float
+    client_queue_s: float
+    slo_good: bool
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -135,6 +159,139 @@ def _summarize_engine_snapshots(
     }
 
 
+def _request_timing(result: RequestResult, slo: SLOThresholds) -> RequestTiming:
+    ttft = (
+        result.first_content_s - result.scheduled_s
+        if result.first_content_s is not None
+        else None
+    )
+    service_ttft = (
+        result.first_content_s - result.started_s
+        if result.first_content_s is not None
+        else None
+    )
+    has_tpot = (
+        result.first_content_s is not None
+        and bool(result.chunk_times_s)
+        and result.completion_tokens > 1
+    )
+    tpot = (
+        (result.chunk_times_s[-1] - result.first_content_s)
+        / (result.completion_tokens - 1)
+        if has_tpot
+        else (0.0 if result.completion_tokens <= 1 else None)
+    )
+    e2e = result.finished_s - result.scheduled_s
+    good = (
+        (slo.ttft_ms is None or (ttft is not None and ttft * 1000 <= slo.ttft_ms))
+        and (slo.tpot_ms is None or (tpot is not None and tpot * 1000 <= slo.tpot_ms))
+        and (slo.e2e_ms is None or e2e * 1000 <= slo.e2e_ms)
+    )
+    return RequestTiming(
+        result=result,
+        ttft_s=ttft,
+        service_ttft_s=service_ttft,
+        tpot_s=tpot,
+        e2e_s=e2e,
+        service_e2e_s=result.finished_s - result.started_s,
+        client_queue_s=result.started_s - result.scheduled_s,
+        slo_good=good,
+    )
+
+
+def _request_summary(results: list[RequestResult], successful: list[RequestResult]) -> dict:
+    failed = len(results) - len(successful)
+    status_codes = Counter(
+        str(result.status_code or "transport")
+        for result in results
+        if not result.succeeded
+    )
+    return {
+        "total": len(results),
+        "successful": len(successful),
+        "failed": failed,
+        "error_rate": failed / len(results),
+        "status_codes": dict(status_codes),
+        "max_observed_concurrency": _max_concurrency(results),
+        "average_inflight_requests": _time_weighted_request_count(
+            results, use_scheduled_start=True
+        ),
+        "average_transport_requests": _time_weighted_request_count(
+            results, use_scheduled_start=False
+        ),
+    }
+
+
+def _token_summary(successful: list[RequestResult], engine: dict) -> dict:
+    prompt = sum(result.prompt_tokens or 0 for result in successful)
+    completion = sum(result.completion_tokens for result in successful)
+    cached = sum(result.cached_tokens or 0 for result in successful)
+    request_accepted = [
+        result.accepted_tokens
+        for result in successful
+        if result.accepted_tokens is not None
+    ]
+    accepted = engine["accepted_tokens"]
+    if accepted is None and request_accepted:
+        accepted = sum(request_accepted)
+    return {
+        "prompt": prompt,
+        "completion": completion,
+        "accepted": accepted,
+        "cached": cached,
+        "prefix_cache_hit_rate": cached / prompt if prompt else None,
+        "count_sources": dict(Counter(result.token_count_source for result in successful)),
+    }
+
+
+def _latency_summary(timings: list[RequestTiming], results: list[RequestResult]) -> dict:
+    intervals = [
+        current - previous
+        for timing in timings
+        for previous, current in zip(
+            timing.result.chunk_times_s, timing.result.chunk_times_s[1:]
+        )
+    ]
+    present = lambda values: [value for value in values if value is not None]
+    return {
+        "ttft": distribution(present([item.ttft_s for item in timings]), 1000),
+        "service_ttft": distribution(
+            present([item.service_ttft_s for item in timings]), 1000
+        ),
+        "tpot": distribution(
+            present([item.tpot_s for item in timings if item.result.completion_tokens > 1]),
+            1000,
+        ),
+        "inter_chunk": distribution(intervals, 1000),
+        "e2e": distribution([item.e2e_s for item in timings], 1000),
+        "service_e2e": distribution([item.service_e2e_s for item in timings], 1000),
+        "client_queue": distribution(
+            [result.started_s - result.scheduled_s for result in results], 1000
+        ),
+    }
+
+
+def _slo_summary(
+    timings: list[RequestTiming],
+    slo: SLOThresholds,
+    duration: float,
+    total_requests: int,
+) -> dict:
+    good = [timing for timing in timings if timing.slo_good]
+    good_tokens = sum(item.result.completion_tokens for item in good)
+    return {
+        "enabled": slo.enabled,
+        "ttft_ms": slo.ttft_ms,
+        "tpot_ms": slo.tpot_ms,
+        "e2e_ms": slo.e2e_ms,
+        "good_requests": len(good) if slo.enabled else None,
+        "goodput_request_per_s": len(good) / duration if slo.enabled else None,
+        "good_output_tokens": good_tokens if slo.enabled else None,
+        "goodput_output_token_per_s": good_tokens / duration if slo.enabled else None,
+        "attainment": len(good) / total_requests if slo.enabled else None,
+    }
+
+
 def summarize(
     results: list[RequestResult],
     ttft_slo_ms: float | None = None,
@@ -148,146 +305,23 @@ def summarize(
     started = min(result.scheduled_s for result in results)
     finished = max(result.finished_s for result in results)
     duration = max(finished - started, 1e-12)
-
-    ttfts = [
-        result.first_content_s - result.scheduled_s
-        for result in successful
-        if result.first_content_s is not None
-    ]
-    service_ttfts = [
-        result.first_content_s - result.started_s
-        for result in successful
-        if result.first_content_s is not None
-    ]
-    e2es = [result.finished_s - result.scheduled_s for result in successful]
-    service_e2es = [result.finished_s - result.started_s for result in successful]
-    tpots = [
-        (result.chunk_times_s[-1] - result.first_content_s) / (result.completion_tokens - 1)
-        for result in successful
-        if result.first_content_s is not None and result.chunk_times_s and result.completion_tokens > 1
-    ]
-    chunk_intervals = [
-        current - previous
-        for result in successful
-        for previous, current in zip(result.chunk_times_s, result.chunk_times_s[1:])
-    ]
-    client_queue = [result.started_s - result.scheduled_s for result in results]
-
-    good_requests = 0
-    slo_enabled = any(value is not None for value in (ttft_slo_ms, tpot_slo_ms, e2e_slo_ms))
-    for result in successful:
-        ttft_ms = (
-            (result.first_content_s - result.scheduled_s) * 1000
-            if result.first_content_s is not None
-            else math.inf
-        )
-        tpot_ms = (
-            (result.chunk_times_s[-1] - result.first_content_s) * 1000 / (result.completion_tokens - 1)
-            if result.first_content_s is not None and result.chunk_times_s and result.completion_tokens > 1
-            else 0.0
-        )
-        e2e_ms = (result.finished_s - result.scheduled_s) * 1000
-        good_requests += int(
-            (ttft_slo_ms is None or ttft_ms <= ttft_slo_ms)
-            and (tpot_slo_ms is None or tpot_ms <= tpot_slo_ms)
-            and (e2e_slo_ms is None or e2e_ms <= e2e_slo_ms)
-        )
-
-    status_codes = Counter(str(result.status_code or "transport") for result in results if not result.succeeded)
-    token_sources = Counter(result.token_count_source for result in successful)
-    prompt_tokens = sum(result.prompt_tokens or 0 for result in successful)
-    completion_tokens = sum(result.completion_tokens for result in successful)
-    accepted_values = [
-        result.accepted_tokens
-        for result in successful
-        if result.accepted_tokens is not None
-    ]
-    request_accepted_tokens = sum(accepted_values) if accepted_values else None
-    cached_tokens = sum(result.cached_tokens or 0 for result in successful)
+    slo = SLOThresholds(ttft_slo_ms, tpot_slo_ms, e2e_slo_ms)
+    timings = [_request_timing(result, slo) for result in successful]
     engine = _summarize_engine_snapshots(engine_snapshots, started, finished)
-    accepted_tokens = (
-        engine["accepted_tokens"]
-        if engine["accepted_tokens"] is not None
-        else request_accepted_tokens
-    )
-    good_output_tokens = sum(
-        result.completion_tokens
-        for result in successful
-        if (
-            (ttft_slo_ms is None or (
-                result.first_content_s is not None
-                and (result.first_content_s - result.scheduled_s) * 1000 <= ttft_slo_ms
-            ))
-            and (tpot_slo_ms is None or (
-                result.completion_tokens <= 1
-                or (
-                    result.first_content_s is not None
-                    and bool(result.chunk_times_s)
-                    and (result.chunk_times_s[-1] - result.first_content_s)
-                    * 1000
-                    / (result.completion_tokens - 1)
-                    <= tpot_slo_ms
-                )
-            ))
-            and (
-                e2e_slo_ms is None
-                or (result.finished_s - result.scheduled_s) * 1000 <= e2e_slo_ms
-            )
-        )
-    )
+    tokens = _token_summary(successful, engine)
     return {
         "duration_s": duration,
-        "requests": {
-            "total": len(results),
-            "successful": len(successful),
-            "failed": len(results) - len(successful),
-            "error_rate": (len(results) - len(successful)) / len(results),
-            "status_codes": dict(status_codes),
-            "max_observed_concurrency": _max_concurrency(results),
-            "average_inflight_requests": _time_weighted_request_count(
-                results, use_scheduled_start=True
-            ),
-            "average_transport_requests": _time_weighted_request_count(
-                results, use_scheduled_start=False
-            ),
-        },
-        "tokens": {
-            "prompt": prompt_tokens,
-            "completion": completion_tokens,
-            "accepted": accepted_tokens,
-            "cached": cached_tokens,
-            "prefix_cache_hit_rate": cached_tokens / prompt_tokens if prompt_tokens else None,
-            "count_sources": dict(token_sources),
-        },
+        "requests": _request_summary(results, successful),
+        "tokens": tokens,
         "throughput": {
             "request_per_s": len(successful) / duration,
-            "output_token_per_s": completion_tokens / duration,
-            "total_token_per_s": (prompt_tokens + completion_tokens) / duration,
+            "output_token_per_s": tokens["completion"] / duration,
+            "total_token_per_s": (tokens["prompt"] + tokens["completion"]) / duration,
             "accepted_token_per_s": (
-                accepted_tokens / duration if accepted_tokens is not None else None
+                tokens["accepted"] / duration if tokens["accepted"] is not None else None
             ),
         },
-        "latency_ms": {
-            "ttft": distribution(ttfts, 1000),
-            "service_ttft": distribution(service_ttfts, 1000),
-            "tpot": distribution(tpots, 1000),
-            "inter_chunk": distribution(chunk_intervals, 1000),
-            "e2e": distribution(e2es, 1000),
-            "service_e2e": distribution(service_e2es, 1000),
-            "client_queue": distribution(client_queue, 1000),
-        },
-        "slo": {
-            "enabled": slo_enabled,
-            "ttft_ms": ttft_slo_ms,
-            "tpot_ms": tpot_slo_ms,
-            "e2e_ms": e2e_slo_ms,
-            "good_requests": good_requests if slo_enabled else None,
-            "goodput_request_per_s": good_requests / duration if slo_enabled else None,
-            "good_output_tokens": good_output_tokens if slo_enabled else None,
-            "goodput_output_token_per_s": (
-                good_output_tokens / duration if slo_enabled else None
-            ),
-            "attainment": good_requests / len(results) if slo_enabled else None,
-        },
+        "latency_ms": _latency_summary(timings, results),
+        "slo": _slo_summary(timings, slo, duration, len(results)),
         "engine": engine,
     }
