@@ -14,7 +14,7 @@
 - [x] Run structure, compile, CPU/Mock, quantization, state, scheduler, API, and
   benchmark regressions; record CUDA skips as pending.
 - [x] Update local results and owning specs.
-- [>] Validate runner metadata, MTP proposal/acceptance, DeltaNet state writes,
+- [x] Validate runner metadata, MTP proposal/acceptance, DeltaNet state writes,
   FP8 attention dispatch, eager/Full/Piecewise Graph, offline JSON parity, and
   online smoke behavior on the RTX 4090D when the server returns.
 

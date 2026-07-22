@@ -143,3 +143,22 @@ def test_prefix_commit_requires_exact_request_mapping():
     with pytest.raises(ValueError, match=r"missing=\[11\]"):
         manager.commit_branches({10: 1})
     assert set(manager.branches) == {10, 11}
+
+
+def test_reset_metrics_preserves_owned_state_and_resets_counters():
+    manager = HybridStateManager(FakeHybridModel(), torch.float32)
+    manager.allocate(2, device="cpu", branch_slots_per_sequence=2)
+    manager.get(10)
+    manager.reserve_branches({10: 2})
+    manager.max_active = 9
+    manager.max_reserved_branches = 7
+    manager.branch_commits = 3
+    manager.branch_discards = 4
+
+    manager.reset_metrics()
+
+    assert manager.max_active == 1
+    assert manager.max_reserved_branches == 2
+    assert manager.branch_commits == 0
+    assert manager.branch_discards == 0
+    assert manager.slots == {10: 0}

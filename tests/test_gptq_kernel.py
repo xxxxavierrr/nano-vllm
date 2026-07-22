@@ -1,7 +1,8 @@
 import pytest
 import torch
+import torch.nn.functional as F
 
-from nanovllm.layers.gptq import gptq_linear_reference
+from nanovllm.layers.gptq import dequantize_gptq_weight, gptq_linear_reference
 from nanovllm.layers.gptq_kernel import (
     gptq_w4a16_linear,
     repack_gptq_qweight,
@@ -46,14 +47,33 @@ def _make_inputs(
     return x, qweight, scales, qzeros, g_idx
 
 
+def _assert_w4_matches_references(
+    actual,
+    x,
+    qweight,
+    scales,
+    qzeros,
+    g_idx,
+    bias=None,
+):
+    weight = dequantize_gptq_weight(qweight, scales, qzeros, g_idx)
+    fp32_expected = F.linear(x.float(), weight.float()).to(x.dtype)
+    if bias is not None:
+        fp32_expected = fp32_expected + bias
+    bf16_expected = gptq_linear_reference(
+        x, qweight, scales, qzeros, g_idx, bias
+    )
+    torch.testing.assert_close(actual, fp32_expected, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(actual, bf16_expected, rtol=3e-2, atol=7e-2)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("m", [1, 8, 19, 64, 128, 512])
 @pytest.mark.parametrize("desc_act", [False, True])
 def test_gptq_w4a16_matches_reference(m, desc_act):
     x, qweight, scales, qzeros, g_idx = _make_inputs(m, 256, 192, desc_act)
-    expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx)
     actual = gptq_w4a16_linear(x, qweight, scales, qzeros, g_idx)
-    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+    _assert_w4_matches_references(actual, x, qweight, scales, qzeros, g_idx)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -61,7 +81,6 @@ def test_gptq_w4a16_symmetric_zero_fast_path_matches_reference():
     x, qweight, scales, qzeros, g_idx = _make_inputs(
         19, 256, 192, desc_act=True, symmetric_zero=True
     )
-    expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx)
     actual = gptq_w4a16_linear(
         x,
         qweight,
@@ -70,7 +89,7 @@ def test_gptq_w4a16_symmetric_zero_fast_path_matches_reference():
         g_idx,
         symmetric_zero=True,
     )
-    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+    _assert_w4_matches_references(actual, x, qweight, scales, qzeros, g_idx)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -78,7 +97,6 @@ def test_desc_act_runtime_repack_fuses_activation_permutation():
     x, qweight, scales, qzeros, g_idx = _make_inputs(
         19, 256, 192, desc_act=True
     )
-    expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx)
     permutation = torch.argsort(g_idx, stable=True).to(torch.int32)
     runtime_qweight = repack_gptq_qweight(qweight, permutation)
 
@@ -93,7 +111,7 @@ def test_desc_act_runtime_repack_fuses_activation_permutation():
         group_size=128,
     )
 
-    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+    _assert_w4_matches_references(actual, x, qweight, scales, qzeros, g_idx)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -101,9 +119,10 @@ def test_gptq_w4a16_bias_and_leading_dimensions():
     x, qweight, scales, qzeros, g_idx = _make_inputs(6, 256, 192)
     x = x.reshape(2, 3, 256)
     bias = torch.randn(192, device="cuda", dtype=torch.bfloat16)
-    expected = gptq_linear_reference(x, qweight, scales, qzeros, g_idx, bias)
     actual = gptq_w4a16_linear(x, qweight, scales, qzeros, g_idx, bias)
-    torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+    _assert_w4_matches_references(
+        actual, x, qweight, scales, qzeros, g_idx, bias
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

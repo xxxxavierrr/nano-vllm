@@ -30,3 +30,15 @@ budget exceptions and must disappear when their owning component is touched.
 The refactor changes CUDA metadata assembly and launch orchestration even
 though numerical kernels and public tensor layouts are preserved. CPU/Mock and
 compile evidence are insufficient to archive it before RTX 4090D validation.
+
+## 2026-07-23: model smoke is an import and ownership gate
+
+Unit collection did not import the lazy public `LLM` path and did not exercise benchmark
+warmup mutation. Public-entrypoint regression now covers moved types, while runtime metric
+reset belongs to `HybridStateManager` and is exposed through `ModelRunner.reset_metrics()`;
+benchmark code no longer assigns a read-only runner property.
+
+## 2026-07-23: Piecewise capacity follows the token budget
+
+The Piecewise capture limit is `min(piecewise_max_tokens, max_num_batched_tokens, 512)`.
+Request concurrency and speculative decode width do not cap prefill/mixed capture buckets.

@@ -114,13 +114,7 @@ def infer_piecewise_capture_limit(
         raise ValueError("CUDA Graph capture limits must be positive")
     if speculative_tokens < 0:
         raise ValueError("speculative_tokens cannot be negative")
-    decode_query_len = 1 + speculative_tokens
-    inferred_limit = min(max_num_seqs * decode_query_len * 2, 512)
-    return min(
-        requested_max_tokens,
-        max_num_batched_tokens,
-        inferred_limit,
-    )
+    return min(requested_max_tokens, max_num_batched_tokens, 512)
 
 
 class CUDAGraphDispatcher:

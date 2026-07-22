@@ -11,7 +11,6 @@
 | [Runtime architecture](specs/inference-runtime-architecture.md) / [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-010 semantic Full Graph](tasks/active/TASK-20260722-010-semantic-full-graph/README.md) | active | Implement semantic q=1/q=1+k capture keys and replay |
 | [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-011 typed step metrics](tasks/active/TASK-20260722-011-typed-step-metrics/README.md) | active | Return metrics with rank-local model results |
 | [Quantization](specs/quantization.md) / [Speculative decoding](specs/speculative-decoding.md) / [Gated DeltaNet](specs/gated-deltanet.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260722-012 quant/spec/state optimization](tasks/active/TASK-20260722-012-spec-quant-state-optimization/README.md) | active | Implement benchmark instrumentation locally; RTX 4090D correctness and SLO-goodput validation pending |
-| [Engineering workflow](specs/engineering-workflow.md) / [Runtime architecture](specs/inference-runtime-architecture.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260723-013 structural harness and refactor](tasks/active/TASK-20260723-013-structural-harness-refactor/README.md) | active | Local structural and CPU/Mock gates pass; GPU runner/kernel equivalence remains pending |
 
 ## Completed
 
@@ -22,6 +21,7 @@
 | [Quantization](specs/quantization.md) / [Speculative decoding](specs/speculative-decoding.md) | [TASK-20260722-004 vLLM V1 study](tasks/completed/TASK-20260722-004-vllm-v1-quant-spec-study/README.md) | 2026-07-22 | Pinned V1 quant lifecycle and speculative scheduler/proposer protocol; obsolete V0 paths excluded |
 | [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-005 vLLM V1 study](tasks/completed/TASK-20260722-005-vllm-v1-cudagraph-study/README.md) | 2026-07-22 | Pinned V1 policy, keys, capture ownership, backend capability, memory rules, and local gaps documented |
 | [Inference runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-006 Qwen3.6 runtime architecture](tasks/completed/TASK-20260722-006-qwen36-runtime-architecture/README.md) | 2026-07-22 | Cross-capability ownership, target components, non-goals, and staged refactoring order documented |
+| [Engineering workflow](specs/engineering-workflow.md) / [Runtime architecture](specs/inference-runtime-architecture.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260723-013 structural harness and refactor](tasks/completed/TASK-20260723-013-structural-harness-refactor/README.md) | 2026-07-23 | Executable structure gate, decomposed orchestration, and RTX 4090D runtime validation |
 
 ## Rules
 

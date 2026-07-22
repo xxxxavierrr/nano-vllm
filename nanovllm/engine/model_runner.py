@@ -308,6 +308,9 @@ class ModelRunner:
         self.hybrid_state.release(seq_ids)
         self.speculative_step.release(seq_ids)
 
+    def reset_metrics(self) -> None:
+        self.hybrid_state.reset_metrics()
+
     @property
     def delta_state_capacity(self) -> int | None:
         return self.hybrid_state.capacity

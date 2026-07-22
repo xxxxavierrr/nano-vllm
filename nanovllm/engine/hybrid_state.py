@@ -75,6 +75,14 @@ class HybridStateManager:
         self.branch_discards = 0
         self.rejected_prefix_target_replays = 0
 
+    def reset_metrics(self) -> None:
+        """Reset high-water marks and counters without changing state ownership."""
+        self.max_active = max(len(self.slots), len(self.transient))
+        self.max_reserved_branches = sum(map(len, self.branches.values()))
+        self.branch_commits = 0
+        self.branch_discards = 0
+        self.rejected_prefix_target_replays = 0
+
     @property
     def working(self) -> None:
         """The copy-based working slab was removed by branch-state commit."""

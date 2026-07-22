@@ -82,6 +82,8 @@ accepted-token accounting, cache positions, or user-visible output.
   when configured from the same default list.
 - The current default token buckets remain `1, 2, 4`, then multiples of eight
   through the configured Piecewise limit, including the exact upper limit.
+- The effective Piecewise limit is the minimum of the requested limit, the
+  scheduled-token budget, and 512; request concurrency does not reduce it.
 - Full candidates additionally encode request count and uniform query length;
   token count alone is insufficient for speculative verification.
 - The dispatcher precomputes the smallest compatible captured candidate for a
@@ -311,3 +313,6 @@ candidate selection, padding metadata, and fallback reasons.
 - 2026-07-22: Added pinned V1 policy, keys, backend capability, startup/memory,
   quantization/speculative/stateful integration rules, local alignment, and
   implementation gaps.
+- 2026-07-23: Fixed Piecewise capacity to follow the configured token budget up
+  to 512 instead of being truncated by decode concurrency, and retained the
+  requirement for captured-key/replay evidence beyond execution-mode labels.

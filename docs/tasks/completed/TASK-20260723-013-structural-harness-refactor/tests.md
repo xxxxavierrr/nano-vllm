@@ -38,11 +38,28 @@
   absent and one PyTorch Inductor template fails under Windows GBK. A broader
   retry timed out and is not counted as passed.
 
-## Pending GPU evidence
+## GPU evidence
 
-- Compare old/new prepared metadata and outputs on Qwen3.6 for eager,
-  Piecewise, Full decode, mixed batches, MTP `k=1..3`, FP8 KV, branch-state
-  commit, abort, preemption, and prefix-cache lifecycle.
-- Run offline JSON/schema parity and online streaming smoke tests.
-- Run DeltaNet and FP8 attention CUDA correctness tests currently unavailable
-  locally; the 16 DeltaNet skips observed in a focused command remain pending.
+- Existing PyTorch `2.8.0+cu128`, Triton `3.4.0`, and flash-attn `2.8.3.post1` were retained,
+  so validation did not replace the known-good environment.
+- Focused CPU/Mock regression: `98 passed`; initial CUDA regression exposed two BF16-reference tolerance failures.
+- Numeric diagnosis found the Triton kernel within `7.6e-06` of explicit FP32 accumulation while CUDA BF16
+  `F.linear` differed by as much as `0.0625`; the test now enforces both baselines with precision-appropriate bounds.
+- Final unfiltered suite: `198 passed, 1 Starlette/httpx deprecation warning`.
+- Public `nanovllm.LLM` and benchmark imports now have a regression test after GPU smoke exposed a stale moved-type import.
+- Qwen3-0.6B eager offline inference completed through the extracted `BatchPlanner` and runner facade.
+- `FULL_AND_PIECEWISE` reports 64 prefill tokens in one PIECEWISE step and 14 decode tokens in seven FULL steps,
+  with no EAGER fallback after restoring the configured Piecewise token limit.
+- Qwen3.6-27B GPTQ loads and completes eager inference with DeltaNet state capacity allocated.
+- MTP `k=2` completed three verification rounds with three branch commits, six discarded branch slots,
+  and `rejected_prefix_target_replays=0`.
+- FP8 KV CUDA tests and engine smoke pass; token capacity increased from 94,720 to 186,624 tokens,
+  while the short-run TPOT changed from 32.39 ms to 35.49 ms.
+- Online `/health` returned ready and the OpenAI-compatible streaming request emitted SSE content before clean shutdown.
+
+## Remaining limitations outside this refactor
+
+- PIECEWISE dispatch is proven, but Inductor logs still report some regions skipped because CPU arguments reach them;
+  per-region captured-key/replay proof remains owned by the semantic CUDA Graph task.
+- Small smoke timings are not goodput conclusions; offered-load sweeps and Qwen3.6 SLO performance remain with the
+  active optimization task.

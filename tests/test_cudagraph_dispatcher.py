@@ -96,13 +96,13 @@ def test_capture_size_generation_keeps_requested_limit():
     assert make_piecewise_capture_sizes(512) == [1, 2, 4, *range(8, 513, 8)]
 
 
-def test_piecewise_capture_limit_tracks_runtime_decode_scale():
+def test_piecewise_capture_limit_tracks_configured_token_budget():
     assert infer_piecewise_capture_limit(
         requested_max_tokens=512,
         max_num_batched_tokens=256,
         max_num_seqs=8,
         speculative_tokens=3,
-    ) == 64
+    ) == 256
     assert infer_piecewise_capture_limit(
         requested_max_tokens=512,
         max_num_batched_tokens=8,

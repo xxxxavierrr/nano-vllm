@@ -10,7 +10,8 @@ from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
-from nanovllm.engine.model_runner import ModelRunner, SpeculativeBatchOutput
+from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.speculative_step import SpeculativeBatchOutput
 
 
 @dataclass(slots=True)

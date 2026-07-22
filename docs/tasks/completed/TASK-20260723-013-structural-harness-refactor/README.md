@@ -1,6 +1,6 @@
 # TASK-20260723-013 structural harness and refactor
 
-Status: active
+Status: completed
 
 Owning specs:
 
@@ -18,9 +18,9 @@ calibration orchestration, or mixed reference/runtime modules.
 
 ## Current gate
 
-The strict structure hook and local CPU/Mock suite pass. GPU numerical,
-Full/Piecewise Graph, online, and performance equivalence remain pending until
-the RTX 4090D server returns; no local result is promoted to GPU evidence.
+The strict structure hook, full `198 passed` CPU/CUDA regression,
+Qwen3/Qwen3.6 model smokes, MTP branch-state,
+FP8 KV, offline benchmark, and online streaming gates pass on the RTX 4090D.
 
 ## Records
 

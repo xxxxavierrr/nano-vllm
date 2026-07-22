@@ -208,7 +208,7 @@ def _warmup(llm: LLM, args) -> float:
         use_tqdm=False,
     )
     llm.scheduler.num_preemptions = 0
-    llm.model_runner.max_active_delta_states = 0
+    llm.model_runner.reset_metrics()
     return perf_counter() - started
 
 
