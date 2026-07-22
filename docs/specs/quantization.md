@@ -29,6 +29,14 @@ graph compatibility, accuracy, observability, and benchmark comparison.
   Repacking and calibration must not occur in the request hot path.
 - Quantized modules allocate their production storage directly; they must not
   materialize full BF16 weights on GPU.
+- The production W4A16 fast path must combine packed-weight decode,
+  dequantization, and matrix multiplication in one runtime operator without a
+  global BF16 weight or dequantized-weight scratch tensor. A reference or
+  fallback implementation may dequantize explicitly, but it is not the
+  performance backend.
+- GPTQ checkpoint layout and runtime kernel layout are distinct. Any weight
+  permutation, interleave, zero-point normalization, or scale repack happens
+  once after loading and is owned by the selected quantization method.
 - Weight quantization and KV-cache quantization remain independently selectable.
 - Quantization decisions are per layer/module and prefix. Unsupported layers or
   explicit skip rules may use another method only through a documented,
@@ -49,6 +57,16 @@ graph compatibility, accuracy, observability, and benchmark comparison.
   modes without hidden host synchronization or first-request compilation.
 - Accuracy and performance are measured against the same model/workload in a
   memory-safe sequential comparison.
+- Kernel selection is split by numerical shape/hardware regime, not by request
+  label. W4A16 must cover optimized small-M and large-M paths; fused W4A8 is a
+  later large-M optimization after W4A16, state branching, and rejection
+  correctness are established.
+- FP8 KV cache and FP8 DeltaNet state are capacity optimizations. They are
+  selected by maximum SLO goodput at each mode's best stable concurrency, not
+  by equal-concurrency latency alone.
+- FFN W3A16 is deferred until W4, Graph, speculative state, KV, and recurrent
+  state measurements show that weight capacity still prevents the desired
+  scheduler concurrency.
 
 ## Scope
 
@@ -159,7 +177,15 @@ Follow-up architecture requirements:
   and recurrent state separately; a single "quantized model bytes" number is
   insufficient.
 - Keep nano-vLLM's direct raw-`g_idx` kernel as the correctness baseline. Weight
-  shuffle/permutation is a measured kernel optimization, not a loader semantic.
+  shuffle/permutation is a measured kernel optimization, not a checkpoint
+  semantic. The optimized backend may precompute `argsort(g_idx)`, repack
+  weights, and fuse the matching activation permutation into its input loads;
+  a standalone request-time gather is not acceptable.
+- Select W4A16 runtime kernels by tensor shape and hardware capability rather
+  than scheduler labels such as prefill/decode. The current raw-layout Triton
+  operator remains a correctness/fallback path; the production target is an
+  Ada SM89/RTX 4090D-oriented Marlin-style CUDA kernel whose dataflow does not
+  construct a reusable BF16 weight tile in global memory.
 
 ## Constraints
 
@@ -178,3 +204,11 @@ target checkpoint shapes.
   and a source study of vLLM V1 conventions.
 - 2026-07-22: Added the pinned vLLM V1 resolution/layer/cache lifecycle,
   nano-vLLM alignment, stricter fused-`g_idx` invariant, and follow-up gaps.
+- 2026-07-22: Required load-time GPTQ-to-runtime repacking and a fused W4A16
+  production operator; clarified that the current one-launch Triton path is a
+  correctness fallback rather than a two-kernel dequantization design.
+- 2026-07-22: Corrected the target GPU to RTX 4090D 24 GB (Ada SM89); kernel
+  selection, workspace, and state/KV capacity benchmarks must use that target.
+- 2026-07-22: Ordered optimization around Marlin-style W4A16 small/large-M,
+  then fused W4A8 large-M and measured FP8 cache/state capacity; deferred
+  W3A16 until goodput evidence proves memory remains the limiting resource.

@@ -10,6 +10,7 @@
 | [Runtime architecture](specs/inference-runtime-architecture.md) / [Speculative decoding](specs/speculative-decoding.md) | [TASK-20260722-009 speculator extraction](tasks/active/TASK-20260722-009-speculator-extraction/README.md) | active | Extract MTP proposal and acceptance interfaces |
 | [Runtime architecture](specs/inference-runtime-architecture.md) / [CUDA Graphs](specs/cuda-graphs.md) | [TASK-20260722-010 semantic Full Graph](tasks/active/TASK-20260722-010-semantic-full-graph/README.md) | active | Implement semantic q=1/q=1+k capture keys and replay |
 | [Runtime architecture](specs/inference-runtime-architecture.md) | [TASK-20260722-011 typed step metrics](tasks/active/TASK-20260722-011-typed-step-metrics/README.md) | active | Return metrics with rank-local model results |
+| [Quantization](specs/quantization.md) / [Speculative decoding](specs/speculative-decoding.md) / [Gated DeltaNet](specs/gated-deltanet.md) / [Benchmarking](specs/benchmarking.md) | [TASK-20260722-012 quant/spec/state optimization](tasks/active/TASK-20260722-012-spec-quant-state-optimization/README.md) | active | Implement benchmark instrumentation locally; RTX 4090D correctness and SLO-goodput validation pending |
 
 ## Completed
 

@@ -28,6 +28,12 @@ semantics while avoiding infrastructure that nano-vLLM does not need.
   different; do not multiply public wrappers to mirror kernels.
 - Preserve convolution/recurrent state lifetime, MTP working state, padding,
   W4A16 compatibility, and CUDA Graph behavior.
+- Speculative execution retains the state after every verified prefix in
+  distinct candidate state slots. Acceptance commits by remapping the request
+  to the selected prefix slot; rejection discards unselected suffix slots.
+  Production execution must not reconstruct accepted recurrent/conv state by
+  replaying the target model or by copying and then restoring a whole state
+  slab.
 - Source-level decisions must distinguish essential vLLM semantics from
   vLLM-specific registry, platform, and distributed infrastructure.
 - Scheduler/runner code must build all request partition, sequence-offset,
@@ -40,6 +46,9 @@ semantics while avoiding infrastructure that nano-vLLM does not need.
   convolution and DeltaNet kernels consume tensor metadata.
 - Prefill kernel compilation/autotuning must be warmed before final cache
   capacity is calculated, independently of CUDA Graph mode.
+- State-capacity planning includes speculative branch slots and exposes their
+  memory cost. If branch capacity is unavailable, scheduling reduces
+  speculation or concurrency explicitly; state slots must never alias.
 
 ## Scope
 
@@ -66,6 +75,9 @@ semantics while avoiding infrastructure that nano-vLLM does not need.
   in this spec and durable knowledge.
 - Production, warmup, and tests obtain GDN metadata through the runner-side
   builder contract; the model layer has no request-derived fallback builder.
+- FP8 recurrent/conv state remains opt-in until its lower state bytes increase
+  maximum stable scheduler batch and SLO goodput after conversion cost and
+  numerical error are included.
 
 ## Constraints
 
@@ -169,3 +181,8 @@ Required follow-up:
 - 2026-07-22: Replaced uniform/non-uniform model-layer convolution branches
   with one packed causal-convolution entry. Output and state-commit remain two
   private kernels to preserve the read-old-state-before-overwrite dependency.
+- 2026-07-22: Required per-prefix speculative state branches and pointer/index
+  commit, eliminating rejected-prefix whole-model replay from the production
+  path.
+- 2026-07-22: Classified FP8 DeltaNet state as a capacity optimization gated by
+  effective scheduler batch and SLO-goodput evidence, not byte savings alone.

@@ -31,6 +31,14 @@ must agree.
 - Target logits and draft information flow through a distinct acceptance
   component. Greedy prefix matching and probabilistic rejection sampling are
   different declared policies, not branches hidden inside a proposer.
+- Probabilistic rejection sampling is lossless with respect to the target
+  distribution: a proposed token `x` is accepted with
+  `min(1, p(x) / q(x))`; at the first rejection the recovery token is sampled
+  from normalized `max(p - q, 0)`; after full acceptance the bonus token is
+  sampled from the target distribution.
+- Target and draft probabilities use the same declared logits transforms.
+  Randomness is per request and reproducible; a fused/blockwise implementation
+  must avoid materializing redundant full-vocabulary softmax buffers.
 - Acceptance supports an arbitrary valid prefix length from zero through `k`.
 - Rejected verification work reduces the request's committed/computed position
   before the next schedule; rejected tokens never become prefix-cache entries or
@@ -43,10 +51,15 @@ must agree.
 - Speculative decoding is optional and preserves non-speculative behavior.
 - Report proposed/accepted/rejected counts, per-position acceptance, effective
   accepted tokens per target step, latency, throughput, and memory overhead.
+- Report accepted tokens/s together with output-token and request goodput,
+  time-weighted running requests, scheduled tokens per step, and TTFT/TPOT p50
+  and p99. Acceptance metrics diagnose speculation but never select a winner
+  without end-to-end SLO goodput.
 
 ## Scope
 
-- Qwen3.6 native MTP with bounded `k`, greedy verification, scheduler and
+- Qwen3.6 native MTP with bounded `k`, greedy and probabilistic verification,
+  scheduler and
   ModelRunner integration, GDN state handling, CUDA Graphs, and benchmarks.
 - Current vLLM V1 speculative-decoding conventions and rejection of obsolete
   V0 worker architecture.
@@ -54,8 +67,8 @@ must agree.
 ## Non-goals
 
 - Reintroducing vLLM V0 `SpecDecodeWorker`/multi-step-worker architecture.
-- Probabilistic sampling until its rejection sampler is explicitly implemented
-  and tested.
+- Top-k/top-p or other transforms until the same transform is implemented and
+  validated identically for target and draft distributions.
 - Draft-tree methods such as DSpark/DDTree unless added by a later task.
 
 ## Acceptance criteria
@@ -64,6 +77,8 @@ must agree.
 - State and cache correctness is tested for all acceptance lengths and lifecycle
   events.
 - Baseline versus each `k` reports acceptance, speed, memory, and concurrency.
+- The selected proposer and `k` maximize output-token/request goodput under the
+  declared latency SLO; maximum raw acceptance length is not the objective.
 - V1 source conventions and intentional nano-vLLM differences are documented.
 
 ## Runtime protocol and ownership
@@ -155,8 +170,8 @@ Follow-up architecture requirements:
   proposal execution, and graph warmup should implement it rather than remain
   global conditionals.
 - Keep `greedy_accept` as an explicit acceptance policy. Sampling with
-  `temperature > 0` stays rejected until a separately tested probabilistic
-  rejection sampler exists.
+  `temperature > 0` uses a separately tested lossless rejection sampler and
+  requires the proposer to return draft logits, not only argmax token IDs.
 - Represent verification input/output with typed metadata rather than parallel
   lists of accepted counts, outputs, and next drafts.
 - Centralize post-verification commit/rollback for target KV, MTP KV, DeltaNet
@@ -172,6 +187,10 @@ Follow-up architecture requirements:
 Qwen hybrid GDN state is mutable and requires explicit working/commit semantics
 when target verification rejects part of a draft chain.
 
+On the RTX 4090D 24 GB target, the 8.8 GB BF16 DSpark draft is an offline-only
+calibration/reference artifact. Online DSpark validation requires a packed
+INT4 draft; published BF16 acceptance cannot be reported as locally measured.
+
 ## Open questions
 
 - Can target verification and next MTP proposal share hidden states safely?
@@ -182,5 +201,14 @@ when target verification rejects part of a draft chain.
 
 - 2026-07-22: Created from the existing Qwen MTP implementation and a planned
   study of current vLLM V1 speculative decoding.
+- 2026-07-22: Made SLO-goodput the speculative optimization target and retained
+  accepted tokens/s, per-position acceptance, and scheduled-token occupancy as
+  diagnostic metrics.
+- 2026-07-22: Removed the infeasible online BF16 DSpark baseline from the 24 GB
+  experiment matrix; required sequential offline BF16/INT4 agreement and a
+  paired-target-plus-INT4-draft runnable baseline.
 - 2026-07-22: Added the pinned V1 scheduler/MRv2 proposer and sampler protocol,
   state ordering, metrics definitions, local gaps, and explicit V0 exclusions.
+- 2026-07-22: Added lossless probability-ratio acceptance, residual
+  `(p-q)+` recovery sampling, shared logits transforms, and per-request RNG as
+  required probabilistic MTP behavior.

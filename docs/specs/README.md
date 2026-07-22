@@ -19,4 +19,5 @@ The schema and lifecycle are defined in
 - [CUDA Graphs](cuda-graphs.md) - compilation, capture, and dispatch
 - [Inference runtime architecture](inference-runtime-architecture.md) -
   Qwen3.6 cross-capability ownership and extension boundaries
+- [Benchmarking](benchmarking.md) - goodput, SLO, capacity, and telemetry
 - [Engineering workflow](engineering-workflow.md) - repository contract
